@@ -1,0 +1,312 @@
+"""Offline tests. Install pytest==8.3.5 httpx==0.28.1 alongside requirements."""
+import asyncio
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+import tomllib
+
+import pytest
+from fastapi.testclient import TestClient
+
+spec = importlib.util.spec_from_file_location("hub_runner", Path(__file__).with_name("main.py"))
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+
+@pytest.fixture(autouse=True)
+def settings(monkeypatch):
+    monkeypatch.setenv("RUNNER_TOKEN", "t" * 40)
+    monkeypatch.setenv("OPENAI_API_KEY", "secret-model-key")
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_AUTH_MODE", raising=False)
+    monkeypatch.delenv("CODEX_OAUTH_AUTH_FILE", raising=False)
+    m.app.state.active = 0
+
+
+def payload(**kwargs):
+    return m.Execute(run_id="r", conversation_id="c", prompt="hello", **kwargs)
+
+
+def test_auth_and_validation_do_not_echo_secrets():
+    with TestClient(m.app) as client:
+        assert client.post("/execute", json={}).status_code == 401
+        r = client.post("/execute", headers={"Authorization": "Bearer " + "t" * 40},
+                        json={"secret": "do-not-echo"})
+        assert r.status_code == 422
+        assert "do-not-echo" not in r.text
+
+
+def test_health_and_missing_credentials(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY")
+    with TestClient(m.app) as client:
+        assert client.get("/health").json()["error"] == "MODEL_API_KEY_NOT_CONFIGURED"
+        assert client.post("/execute", headers={"Authorization": "Bearer " + "t" * 40},
+                           json=payload().model_dump()).status_code == 503
+
+
+def test_isolation_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "must-not-inherit")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://attacker.invalid")
+    p = payload(skills=[{"name": "assigned", "content": "approved content"}],
+                mcps=[{"name": "remote", "url": "https://example.com/mcp", "headers": {"Authorization": "Bearer private"}}])
+    roots = [tmp_path / "one", tmp_path / "two"]
+    homes = []
+    for root in roots:
+        root.mkdir()
+        cwd, env = m.prepare(root, p, "secret-model-key")
+        homes.append(env["CODEX_HOME"])
+        assert "DATABASE_URL" not in env and "OPENAI_BASE_URL" not in env
+        assert env["CODEX_API_KEY"] == "secret-model-key"
+        config = tomllib.loads((Path(env["CODEX_HOME"]) / "config.toml").read_text())
+        assert config["sandbox_mode"] == "read-only"
+        assert config["approval_policy"] == "never"
+        assert config["features"]["shell_tool"] is False
+        assert config["features"]["skip_host_skill_discovery"] is True
+        assert config["skills"]["include_instructions"] is False
+        assert "approved content" in config["developer_instructions"]
+        assert "not a security boundary" in config["developer_instructions"]
+        assert str(roots[1 if root == roots[0] else 0]) not in config["developer_instructions"]
+        assert config["mcp_servers"]["remote"]["http_headers"]["Authorization"] == "Bearer private"
+        assert (cwd / ".agents/skills/assigned/SKILL.md").read_text() == "approved content"
+    assert homes[0] != homes[1]
+
+
+@pytest.mark.parametrize("url", ["http://example.com", "file:///tmp/key", "https://user:pass@example.com", "https://example.com:8443", "https://example.com/#secret"])
+def test_invalid_mcp(url):
+    with pytest.raises(ValueError):
+        m.MCP(name="m", url=url)
+
+
+def test_paths_and_duplicate_names():
+    with pytest.raises(ValueError):
+        payload(skills=[{"name": "../evil", "content": "x"}])
+    with pytest.raises(ValueError):
+        payload(mcps=[{"name": "a", "url": "https://example.com"}, {"name": "A", "url": "https://example.com"}])
+
+
+@pytest.mark.parametrize("ip", ["127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "::ffff:127.0.0.1"])
+def test_private_dns_rejected(ip):
+    async def run():
+        loop = asyncio.get_running_loop()
+        original = loop.getaddrinfo
+        async def fake(*args, **kwargs):
+            return [(None, None, None, None, (ip, 443))]
+        loop.getaddrinfo = fake
+        try:
+            with pytest.raises(m.RunnerError, match="MCP_ADDRESS_FORBIDDEN"):
+                await m.validate_remote(m.MCP(name="m", url="https://example.com"))
+        finally:
+            loop.getaddrinfo = original
+    asyncio.run(run())
+
+
+def test_only_agent_messages(tmp_path):
+    events = [
+        {"type": "item.completed", "item": {"type": "command_execution", "aggregated_output": "TOOL SECRET"}},
+        {"type": "item.completed", "item": {"type": "mcp_tool_call", "result": "MCP SECRET"}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "answer"}},
+        {"type": "turn.completed"},
+    ]
+    script = "import sys; sys.stdin.read(); print(" + repr("\n".join(map(json.dumps, events))) + "); print('stderr secret',file=sys.stderr)"
+    result = asyncio.run(m.process([sys.executable, "-c", script], tmp_path, {"PATH": "/usr/bin:/bin"}, b"prompt", jsonl=True))
+    assert result == "answer"
+
+
+@pytest.mark.parametrize("script,code", [
+    ("print('not json')", "INVALID_CODEX_JSONL"),
+    ("print('{}')", "CODEX_NO_FINAL_RESPONSE"),
+    ("import sys; print('secret', file=sys.stderr); sys.exit(1)", "CODEX_EXECUTION_FAILED"),
+    ("print('{\"type\":\"turn.failed\",\"error\":\"secret\"}')", "CODEX_EXECUTION_FAILED"),
+])
+def test_safe_process_errors(tmp_path, script, code):
+    with pytest.raises(m.RunnerError, match=code):
+        asyncio.run(m.process([sys.executable, "-c", script], tmp_path, {}, jsonl=True))
+
+
+def test_output_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "MAX_OUTPUT", 100)
+    with pytest.raises(m.RunnerError, match="OUTPUT_LIMIT_EXCEEDED"):
+        asyncio.run(m.process([sys.executable, "-c", "print('x'*1000)"], tmp_path, {}))
+
+
+def test_cancellation_kills_process_group(tmp_path):
+    async def run():
+        pidfile = tmp_path / "pid"
+        script = "import os,time,pathlib; pathlib.Path('pid').write_text(str(os.getpid())); time.sleep(30)"
+        task = asyncio.create_task(m.process([sys.executable, "-c", script], tmp_path, {}))
+        for _ in range(100):
+            if pidfile.exists():
+                break
+            await asyncio.sleep(0.02)
+        assert pidfile.exists()
+        pid = int(pidfile.read_text())
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    asyncio.run(run())
+
+
+def test_busy_and_body_limit(monkeypatch):
+    with TestClient(m.app) as client:
+        headers = {"Authorization": "Bearer " + "t" * 40}
+        m.app.state.active = 2
+        assert client.post("/execute", headers=headers, json=payload().model_dump()).status_code == 429
+        m.app.state.active = 0
+        monkeypatch.setattr(m, "MAX_BODY", 8)
+        assert client.post("/execute", headers=headers, content=b"x" * 9).status_code == 413
+        assert m.app.state.active == 0
+
+
+def test_execute_args_redaction_cleanup(monkeypatch):
+    paths = []
+    monkeypatch.setattr(m.shutil, "which", lambda _: "/usr/local/bin/codex")
+    monkeypatch.setattr(m.sys, "platform", "darwin")
+    async def fake(argv, cwd, env, stdin=b"", **kwargs):
+        paths.append(cwd.parent)
+        assert argv[-1] == "-" and stdin == b"hello"
+        assert "--ephemeral" in argv and "read-only" in argv
+        assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+        return "secret-model-key answer"
+    monkeypatch.setattr(m, "process", fake)
+    assert asyncio.run(m.execute(payload(), "secret-model-key")) == "[REDACTED] answer"
+    assert all(not p.exists() for p in paths)
+
+
+def test_linux_fail_closed(monkeypatch):
+    monkeypatch.setattr(m.shutil, "which", lambda _: "/usr/local/bin/codex")
+    monkeypatch.setattr(m.sys, "platform", "linux")
+    calls = []
+    async def fail(argv, *args, **kwargs):
+        calls.append(argv)
+        raise m.RunnerError("CODEX_EXECUTION_FAILED")
+    monkeypatch.setattr(m, "process", fail)
+    with pytest.raises(m.RunnerError, match="SANDBOX_UNAVAILABLE"):
+        asyncio.run(m.execute(payload(), "key"))
+    assert len(calls) == 1 and calls[0][1] == "sandbox"
+
+
+def test_timeout(monkeypatch):
+    monkeypatch.setattr(m.shutil, "which", lambda _: "/usr/local/bin/codex")
+    monkeypatch.setattr(m.sys, "platform", "darwin")
+    monkeypatch.setattr(m, "TIMEOUT", 0.01)
+    async def stall(*args, **kwargs):
+        await asyncio.sleep(30)
+    monkeypatch.setattr(m, "process", stall)
+    with pytest.raises(m.RunnerError, match="RUN_TIMEOUT"):
+        asyncio.run(m.execute(payload(), "key"))
+
+
+def oauth_file(tmp_path, monkeypatch):
+    source = tmp_path / "auth.json"
+    source.write_text(json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": None,
+        "tokens": {"access_token": "test-access", "refresh_token": "test-refresh",
+                   "id_token": "test-id", "account_id": "test-account"}}))
+    source.chmod(0o600)
+    monkeypatch.setenv("CODEX_AUTH_MODE", "chatgpt")
+    monkeypatch.setenv("CODEX_OAUTH_AUTH_FILE", str(source))
+    return source
+
+
+def test_oauth_selection_and_isolation(tmp_path, monkeypatch):
+    source = oauth_file(tmp_path, monkeypatch)
+    assert m.configured() == (None, None)
+    root = tmp_path / "run"
+    root.mkdir()
+    cwd, env = m.prepare(root, payload(), None)
+    assert "CODEX_API_KEY" not in env and "OPENAI_API_KEY" not in env
+    assert "CODEX_OAUTH_AUTH_FILE" not in env
+    assert env["CODEX_HOME"] != str(source.parent)
+    config = tomllib.loads((root / "codex/config.toml").read_text())
+    assert config["forced_login_method"] == "chatgpt"
+    assert config["cli_auth_credentials_store"] == "file"
+    monkeypatch.setenv("CODEX_AUTH_MODE", "invalid")
+    assert m.configured()[1] == "INVALID_CODEX_AUTH_MODE"
+    monkeypatch.setenv("CODEX_AUTH_MODE", "chatgpt")
+    monkeypatch.setenv("CODEX_OAUTH_AUTH_FILE", "relative/auth.json")
+    assert m.configured()[1] == "OAUTH_SOURCE_NOT_CONFIGURED"
+
+
+@pytest.mark.parametrize("invalid", ["permissions", "symlink", "api", "truncated", "missing-token"])
+def test_oauth_invalid_source(tmp_path, monkeypatch, invalid):
+    source = oauth_file(tmp_path, monkeypatch)
+    if invalid == "permissions":
+        source.chmod(0o644)
+    elif invalid == "symlink":
+        link = tmp_path / "link.json"
+        link.symlink_to(source)
+        monkeypatch.setenv("CODEX_OAUTH_AUTH_FILE", str(link))
+    elif invalid == "api":
+        source.write_text('{"auth_mode":"apikey","OPENAI_API_KEY":"secret"}')
+    elif invalid == "truncated":
+        source.write_text('{')
+    else:
+        data = json.loads(source.read_bytes())
+        del data["tokens"]["refresh_token"]
+        source.write_text(json.dumps(data))
+    assert m.configured()[1] == "OAUTH_CREDENTIALS_INVALID"
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancel"])
+def test_oauth_refresh_persisted_and_redacted(tmp_path, monkeypatch, outcome):
+    source = oauth_file(tmp_path, monkeypatch)
+    monkeypatch.setattr(m.shutil, "which", lambda _: "/usr/local/bin/codex")
+    monkeypatch.setattr(m.sys, "platform", "darwin")
+    roots = []
+    async def fake(argv, cwd, env, stdin=b"", **kwargs):
+        roots.append(cwd.parent)
+        path = Path(env["CODEX_HOME"]) / "auth.json"
+        assert path.stat().st_mode & 0o777 == 0o600
+        data = json.loads(path.read_bytes())
+        data["tokens"]["access_token"] = "new-access"
+        path.write_text(json.dumps(data))
+        if outcome == "failure":
+            raise m.RunnerError("CODEX_EXECUTION_FAILED")
+        if outcome == "cancel":
+            raise asyncio.CancelledError()
+        return "test-access new-access answer"
+    monkeypatch.setattr(m, "process", fake)
+    if outcome == "success":
+        assert asyncio.run(m.execute(payload(), None)) == "[REDACTED] [REDACTED] answer"
+    else:
+        with pytest.raises(m.RunnerError if outcome == "failure" else asyncio.CancelledError):
+            asyncio.run(m.execute(payload(), None))
+    assert json.loads(source.read_bytes())["tokens"]["access_token"] == "new-access"
+    assert source.stat().st_mode & 0o777 == 0o600
+    assert all(not root.exists() for root in roots)
+    assert not list(tmp_path.glob(".auth-*"))
+
+
+def test_oauth_lock_and_external_conflict(tmp_path, monkeypatch):
+    source = oauth_file(tmp_path, monkeypatch)
+    one, two = tmp_path / "one", tmp_path / "two"
+    one.mkdir(); two.mkdir()
+    with m.oauth_session(one):
+        with pytest.raises(m.RunnerError, match="OAUTH_BUSY"):
+            with m.oauth_session(two):
+                pytest.fail("overlapping OAuth execution admitted")
+    with pytest.raises(m.RunnerError, match="OAUTH_SOURCE_CHANGED"):
+        with m.oauth_session(two):
+            data = json.loads(source.read_bytes())
+            data["tokens"]["access_token"] = "external-login"
+            source.write_text(json.dumps(data))
+    assert json.loads(source.read_bytes())["tokens"]["access_token"] == "external-login"
+    three = tmp_path / "three"
+    three.mkdir()
+    with m.oauth_session(three):
+        assert json.loads((three / "auth.json").read_bytes())["tokens"]["access_token"] == "external-login"
+
+
+def test_oauth_invalid_refresh_does_not_overwrite(tmp_path, monkeypatch):
+    source = oauth_file(tmp_path, monkeypatch)
+    original = source.read_bytes()
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    with pytest.raises(m.RunnerError, match="OAUTH_CREDENTIALS_INVALID"):
+        with m.oauth_session(isolated):
+            (isolated / "auth.json").write_text("{")
+    assert source.read_bytes() == original
