@@ -17,6 +17,12 @@ class Base(DeclarativeBase):
     pass
 
 
+class SetupState(Base):
+    __tablename__ = 'setup_state'
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    initialized: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class Organization(Base):
     __tablename__ = 'organizations'
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
