@@ -1,12 +1,42 @@
 # codex-im — Agent Hub
 
-Codex CLI 作为执行基座，PostgreSQL 保存用户、授权、聊天、执行队列与审计，React 浏览器工作台，飞书/钉钉回调入口。当前为已完成本地功能验证的第一版，尚未完成生产部署验收。
+基于 Codex CLI、PostgreSQL、FastAPI 与 React 的 AI 协作工作台，支持角色权限、资源授权、聊天执行队列、审计与飞书/钉钉集成。
 
-## 本地访问
+## 安装与首次初始化
 
-网页：http://127.0.0.1:18200
+准备 Python 3.12、Node.js 与 PostgreSQL。使用 Docker 前先审核 [容器影响清单](docs/DOCKER_IMPACT.md)，确认端口、资源、网络、卷与现有服务隔离。
 
-初始账号：`admin@agent-hub.local`。随机密码位于项目 `.env` 的 `BOOTSTRAP_ADMIN_PASSWORD`。该文件权限0600，未把密码写入文档。演示库保留一条“本地验收：未配置模型凭据”会话，用于展示真实失败状态。
+```bash
+python3 scripts/init_env.py
+# 根据部署环境配置 .env 中的模型及可选 IM 凭据
+docker compose config --quiet
+docker compose up -d --build
+```
+
+默认仅监听 http://127.0.0.1:18200。在本机浏览器打开，填写「初始化管理员」的姓名、邮箱、至少 12 位密码与确认密码。第一个成功注册的账号成为启用的超级管理员，随后返回登录页。其余账号由管理员创建。
+
+首次初始化必须在仅本机可访问时完成，再配置 HTTPS 反向代理对外开放，并设置 APP_ORIGIN。空站开放公网后，任何首先注册的人都会取得管理员权限。默认 Docker 回环绑定应保持；远程部署可用 SSH 端口转发完成初始化。
+
+初始化状态仅返回布尔值。PostgreSQL 事务锁串行化首次注册；创建账号与永久初始化标记同事务提交。已有任何用户（含停用用户）的实例自动标记已初始化；删除全部用户也不会重新开放注册。失败事务可重试；并发注册仅一项成功，其余返回 409。
+
+.env.example 不包含默认管理员账号或密码，init_env.py 只生成服务随机密钥且拒绝覆盖已有 .env。可选 BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD 必须显式一起设置，走相同初始化锁和标记；修改它们不会改变已有账号密码。SESSION_SECRET 至少 32 字符，保持稳定以保护会话及加密配置。真实 .env、数据库、运行日志和认证文件不得提交。
+
+## 无容器运行
+
+先创建专用 PostgreSQL 数据库并配置 DATABASE_URL；不要复用其他应用数据库。安装并配置 runner 所需 Codex CLI（固定版本见 runner/Dockerfile）。
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r backend/requirements.txt -r runner/requirements.txt pytest
+npm --prefix frontend ci
+npm --prefix frontend run build
+# 将 .env 的必要配置安全加载到环境，并配置 DATABASE_URL、RUNNER_URL、STATIC_DIR
+PYTHONPATH=backend .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 18200
+# 另一个终端，配置相同 RUNNER_TOKEN 与所需模型认证
+.venv/bin/python -m uvicorn runner.main:app --host 127.0.0.1 --port 18202
+```
+
+scripts/run_local.py 和 run_runner_local.py 是可选项目开发启动器，使用项目相对运行目录；使用前需准备其配置的专用 PG/socket 和 CLI。它们不会自动安装 PostgreSQL 或创建数据库。空库创建表，已有库运行幂等增量迁移；setup_state 为独立新增表，不依赖 create_all 补充既有列。
 
 ## 权限
 
@@ -23,7 +53,7 @@ Codex CLI 作为执行基座，PostgreSQL 保存用户、授权、聊天、执�
 
 ## 页面使用
 
-1. 用初始账号登录，在「用户与角色」新增表单按名称选择组织和部门，可直接新增中文命名目录，ID 自动生成；再创建组织管理员、团队主管或普通成员。
+1. 完成首次管理员注册并登录，在「用户与角色」新增表单按名称选择组织和部门，可直接新增中文命名目录，ID 自动生成；再创建组织管理员、团队主管或普通成员。
 2. 资源管理新增 Skill（完整Markdown，含name和description frontmatter）或HTTPS MCP（仅443端口，支持headers，不支持stdio/OAuth登录流程）。
 3. 授权管理为用户、群分别绑定资源。群聊必须两边均授权才生效。
 4. 聊天页创建私聊或群聊；右侧查看当前生效资源。执行队列异步刷新，同一会话只允许一个待执行任务。
@@ -39,45 +69,8 @@ Codex CLI 作为执行基座，PostgreSQL 保存用户、授权、聊天、执�
 
 URL hash 记录当前页面与会话，例如 `#/chat/<conversation-id>`、`#/resources`，支持刷新及浏览器前进后退；无需全局 localStorage。登录后重新获取当前账号权限与会话列表，不可见或已归档会话清空选择；成员不可访问审计页，未知路由回概览。主动退出清除当前目标，过期重新登录保留目标并重新核验。新建、选择、移除会话同步 URL；移除最后一条显示空态。
 
-本次验证：后端及 runner 162 项通过，前端 24 项通过，TypeScript 与生产静态构建通过。测试在专属 `agent_hub_test` 数据库的随机独立 schema 中执行；IM HTTP 为模拟调用。没有删除真实对话，未执行浏览器视觉验收。
 
-本地 18200 已更新静态构建并核对 HTTP 返回资源与磁盘文件一致；API 已在队列和待清理表情均为 0 时重启，归档两列已完成增量迁移。IM 监督器同步重启以加载归档查询逻辑，旧子进程已退出；runner 保持运行。只读 HTTP 验收通过：登录、会话列表及 can_delete、消息/state/能力、退出。飞书 websocket 状态 connected；钉钉仍为缺少凭据的 webhook 配置。
 
-## Docker
-
-三个基础服务：db、api、runner；可选 `im` profile 增加 im-feishu、im-dingtalk 独立进程，均为linux/amd64。IM不发布端口，只接本项目数据库网络与出网网络。网页绑定127.0.0.1:18200；PG与runner不发布宿主端口。独立网络、卷，不挂本机HOME或docker.sock。
-
-**未构建、创建或启动容器。** 按用户级规则，需要先人工审核 [Docker影响清单](docs/DOCKER_IMPACT.md)。配置静态校验已通过，实际镜像构建和Linux沙箱兼容性未验证。
-
-审核通过后：
-
-```bash
-cd codex-im
-# 如果尚无.env，运行一次；已有文件不会覆盖
-python3 scripts/init_env.py
-# 在.env填入独立OPENAI_API_KEY，以及所选IM凭据
-# 若本地预览仍在18200运行，应先结束该项目的预览进程，避免端口冲突
-docker compose config --quiet
-docker compose up -d --build
-```
-
-不要复制本机其他应用凭据。修改BOOTSTRAP_ADMIN_PASSWORD只影响空数据库初始化，不会修改已有用户密码。空库使用 create_all 初始化；已有库启动时执行 `backend/app/im_migrations.py` 中 advisory lock 保护的幂等增量迁移，包括工作表情表以及会话归档列。生产演进仍需完善版本化迁移与回滚机制。
-
-## 无容器本地运行
-
-现有验证实例：项目`.runtime/pgdata`，端口55439，Unix socket位于`.runtime/pgsocket`，与已有PostgreSQL容器独立。`.runtime`和`.venv`均不进版本管理。
-
-```bash
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -r backend/requirements.txt -r runner/requirements.txt pytest
-npm --prefix frontend ci
-npm --prefix frontend run build
-.venv/bin/python scripts/run_local.py
-# 另一个终端
-.venv/bin/python scripts/run_runner_local.py
-```
-
-本地runner用18202，Vite开发端口18201。项目CLI固定为`.runtime/codex-cli/node_modules/.bin/codex`（`@openai/codex@0.157.1`）。本地launcher默认使用项目`.runtime/codex-oauth/auth.json`中的ChatGPT OAuth；已有登录可直接复用，不需要再次登录。API以单worker运行，队列存储在PG并使用advisory lock领取；重启将中断任务明确标记失败，不自动重放工具写操作。
 
 ### Codex认证配置
 
@@ -104,76 +97,19 @@ services:
       - /absolute/dedicated/codex-oauth:/var/lib/codex-oauth:rw
 ```
 
-本次仅更新配置说明，没有构建或启动Docker；Linux沙箱兼容性仍需独立验收。
 
-## 验证结果
 
-|检查|结果|
-|---|---|
-|后端真实PG权限与worker测试|10通过|
-|IM协议与输入单元测试|8通过|
-|IM真实PG去重、权限、事务回滚|2通过|
-|Runner离线测试|36通过，包含OAuth隔离、刷新、互斥、取消与异常凭据|
-|IM长连接适配器、出站、状态测试|39通过；实际PG事务与mock HTTP，无真实平台发送|
-|IM网页配置权限、加密、保留清除、并发、生效与监督器测试|15通过；隔离PG与模拟子进程，无真实凭据写入|
-|IM发现持久化、审批、应用作用域与不回放|20通过；隔离PG，含HTTP提交、非法验签、并发审批冲突、同级越权、未知旧绑定保护|
-|Skill正文与完整文档兼容回归|6通过；保留已有保存修复|
-|合计|136通过；3条第三方依赖弃用警告|
-|前端TypeScript与生产构建|通过|
-|HTTP端到端|静态页、登录、8个端点、聊天入队、缺凭据明确失败、退出通过|
-|Docker Compose静态校验|通过；未构建运行|
-|浏览器点击/视觉验收|未执行：WebBridge扩展未连接|
-|真实Codex ChatGPT OAuth端到端|2026-09-27通过：HTTP登录→会话→入队→runner→Codex 0.157.1→回复持久化；约11秒|
-|真实飞书/钉钉端到端|本次未主动发消息；自然事件发现未验收|
+## 测试
 
-OAuth验收会话：`a8983ef4-49eb-4aef-8465-1e5a8952b6b5`；run：`3922f624-9d86-4a75-9024-1fc95006f8df`，状态`succeeded`。真实回复：`ChatGPT OAuth真实链路验收成功。`。此为网页使用的HTTP API验收，未执行浏览器点击；没有重新OAuth登录或危险沙箱降级。令牌实际轮换未强制触发，刷新写回路径由离线单测覆盖。
-
-测试命令（本地专属PG运行时）：
+测试需要独立 PostgreSQL 测试库；检查测试 fixture 的 DATABASE_URL 配置后运行。使用随机隔离 schema，不要指向业务库。
 
 ```bash
 PYTHONPATH=backend .venv/bin/python -m pytest backend/tests tests runner/test_runner.py -q
+npm --prefix frontend test -- --run
+npm --prefix frontend run build
 ```
 
-## 管理页面增量验收（2026-09-28）
-
-- 协作群组增加「已发现群 / 待绑定」，按当前应用群聊去重并排除已关联群。仅展示系统已收到事件的群，不是平台全部群或全租户通讯录；未采集群名时显示外部 ID。选择「绑定 / 一键带入」自动带入平台和外部 ID，可创建协作群或关联符合条件的已有群。新建成员必须人工勾选且已绑定当前应用身份，可信内部用户归属只有一个组织时自动选择组织，部门也唯一时自动选择部门；同组织多个部门默认组织级群，多个组织必须明确选择；关联已有群保留组织、团队及成员，必须明确确认，不新增 Skill / MCP 授权。
-- 通用弹窗标题与关闭按钮位于独立头部，正文在 `modal-body` 内滚动；打开时锁定页面背景滚动，关闭后恢复原滚动设置和焦点。
-- 审计日志通过 `/api/audit/page` 服务端分页，支持每页 50/100 条、上一页/下一页、输入页码并点击或回车跳转；切换条数回首页，按用户保存当前会话页码，越界页回到末页；权限过滤后计数，按时间和 ID 倒序稳定排序。
-
-|本次检查|实际结果|
-|---|---|
-|后端及 runner 隔离全测试|173 通过，3 条第三方弃用警告；15.75 秒|
-|前端全测试|31 通过，3 个测试文件；1.17 秒|
-|TypeScript 与生产构建|通过；补齐 Group.external_id 可为 null 的接口类型|
-|真实 HTTP 与静态产物|18200 健康接口 200；在线 JS/CSS 与本地 dist 逐字节一致|
-|真实群数据|待绑定已发现群 1，内部群 0；未提交绑定或创建|
-|真实审计分页|62 条：50 条模式共 2 页（50/12），100 条模式共 1 页；越界回末页，非法条数 51 返回 422|
-|运行进程|API 10886；飞书 IM 95376、钉钉 IM 95608、runner 50168 保持；旧 API 95258 已不存在，无需再次重启|
-|队列|queued/running、待回复、未清理 reaction 均为 0|
-|平台连接状态|飞书 connected；钉钉 missing_credentials，配置未改动|
-|验收范围|正常登录后只读查询业务接口；登录产生常规会话及登录审计。未改真实授权数据，未发送外部消息，未使用 Docker，未做浏览器视觉验收|
-
-## 组织部门与群组管理生命周期
-
-侧栏「组织与部门」入口为 `#/directory`，刷新保留当前页面。两个表格展示中文名称、稳定 ID、部门所属组织及操作；数据库未保存目录创建时间，因此不虚构创建日期。支持新增、改名和确认删除；ID 和部门归属不可编辑。super_admin 管理全局目录；org_admin 可改本组织名称、创建/编辑/删除本组织部门，但不能删除组织；team_lead/member 不进入目录管理页。历史字符串目录只读，并在名称缺失时回退显示 ID。
-
-删除目录前检查全部引用，包括停用用户、归档群组、资源和历史部门记录，存在引用返回中文 409，不级联删除。无引用记录保留归档墓碑，原 ID 和名称仍占用，不能将删除过的 ID 当成 legacy ID 再创建安全范围。所有应用目录引用写入和删除使用同一个 PG 事务锁；IM 审批依次取得应用配置锁、目录锁、群锁，聊天入队依次取得群锁、会话锁。
-
-「协作群组」展示中文组织/部门名称，后端返回 `org_name`、`team_name`、`can_edit`、`can_delete`。编辑仅允许名称与明确勾选的成员；组织、部门、来源、外部群 ID 和应用归属不允许迁移。权限沿用既有 `can_manage_group`：须能管理原成员及新成员，普通成员或只有监管访问权不获得管理权。组织级群支持同组织跨部门，super_admin 全局身份例外保持；成员移除立即撤销成员访问，仍具有独立管理权限的管理员保留其监管权限。
-
-群删除是工作台软归档，保留群外部 ID、会话、消息、运行、授权历史、审计与事件去重；不会删除飞书/钉钉群或清空平台聊天。普通群/会话/消息/state/capabilities/run/发送/授权入口拒绝归档群；审计入口保留原审计。queued/running、未完成回复或未清理 reaction 存在时，编辑和删除均返回 409。活动群外部映射使用部分唯一索引；归档群停止参与映射，后续新事件进入待审批，重新绑定创建独立群 ID，不继承旧群资源授权，旧事件不会重放。可关联未绑定的活动群，此时保留该活动群自己原有的成员及授权。
-
-增量迁移位于 `backend/app/im_migrations.py`，为现有目录/群增加归档列并替换外部映射唯一约束；不依赖 create_all 补列。页面保存成功刷新，失败保留输入，提交与删除有处理中状态。
-
-|此次验证|结果|
-|---|---|
-|后端与 runner 全回归|193 通过，3 条第三方弃用警告；隔离 PostgreSQL 测试库/schema|
-|前端交互与路由|37 通过|
-|TypeScript / 生产构建|通过|
-|本地 HTTP|18200 登录后只读查询目录管理、群组、发现、审计、会话和概览成功；JS/CSS 与 dist 字节一致；归档增量列已核对|
-|进程|API 27746、飞书监督器 27749、钉钉监督器 27750；旧 API/IM 与旧飞书 SDK 子进程已退出；runner 50168 保持不变|
-|运行状态|飞书 connected；钉钉 missing_credentials；活跃任务、待回复、未清理 reaction 均为 0|
-|边界|未编辑删除真实业务数据；登录产生常规 session/audit；未调用模型或发送外部测试消息；未操作 Docker；未执行浏览器视觉验收|
+测试覆盖权限、IM 协议与事务、目录/群/会话生命周期、首次管理员初始化及前端交互。测试模拟外部平台请求，不代表真实平台、Linux 容器沙箱或生产部署已验收。
 
 ## 部署前必须补齐的边界
 
@@ -185,17 +121,3 @@ PYTHONPATH=backend .venv/bin/python -m pytest backend/tests tests runner/test_ru
 - IM输出截取前1800字符，完整内容保留网页；发送失败记录错误，不自动重试。刷新后按 URL 恢复所选会话，通过 state 接口继续同步运行状态。
 
 这些边界未验证或未实现，当前交付不声明达到生产企业级验收标准。
-
-## 组织与部门目录、无组织管理员绑定（2026-09-28）
-
-「协作群组」→「已发现群 / 待绑定」→「绑定 / 一键带入」可分别选择组织与部门；没有目录时点击「新增组织」或「新增部门」，填写中文名称后「创建并选择」，再明确勾选成员与确认绑定，无需抄写内部或外部 ID。「用户与角色」新增表单使用同一目录，组织管理员可不选部门，团队负责人和普通成员必须选一个主部门。
-
-目录保存在 PostgreSQL organizations/departments；组织名全局唯一，部门名在同组织内唯一，创建冲突返回 409。超级管理员创建组织；超级管理员或本组织 org_admin 创建部门；team_lead/member 无创建权。目录读取按组织过滤，team_lead/member 仅看到自己的部门。已有 org_id/team_id 字符串引用作为「历史 ID」展示，不自动建目录、迁移用户或改授权；命名目录部门不能用于其他组织。目录支持改名及无引用时删除，规则见下文；历史 ID 只读。
-
-同一组织可以建立多个部门。用户仍只有一个主部门；群 team_id 为空表示组织级跨部门协作，不支持普通用户跨组织混群，也不表示用户有多部门身份。切换组织或部门清除已勾选成员，关联已有群保留原归属和成员。
-
-只有 super_admin 可作为全局身份被显式加入群：不会改变其 org_id 或角色，也不会自动获得资源。当前应用已绑定身份、显式群成员、active 和应用映射均需通过检查。群能力仍是用户与群授权交集，额外按 conversation.group.org_id 过滤（允许全局资源），禁止使用其他组织工具。super_admin 可明确给自己绑定组织资源，但这些资源只在对应组织群聊中生效，私聊规则保持原样。普通角色无此例外；撤销成员或授权后，后续入队、执行和回复检查会拒绝或收窄能力。含超级管理员的群不因此成为 org_admin 可管理的群，原有成员管理层级规则保留。
-
-自动带入仅使用可信内部身份归属。当前 WebSocket 事件不含部门，本次没有实现远端通讯录同步、扩大平台权限或把应用租户 ID 当成内部组织。
-
-本次回归：后端 140 通过，runner 36 通过（合计 176），前端 34 通过，TypeScript/生产构建通过。真实 18200 登录只读验收及 JS/CSS 字节核对通过；API 与两个 IM 监督器在空闲时重启，飞书 connected，钉钉 missing_credentials，runner 未改。真实目录仍为空、用户 1、群 0、授权 1；组织和群仅在用户实际操作时创建，未发送真实测试消息。浏览器视觉验收未执行。

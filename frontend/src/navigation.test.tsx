@@ -14,6 +14,7 @@ beforeEach(() => {
   window.history.replaceState(null,'','#/chat/a');
   Element.prototype.scrollIntoView = vi.fn(); HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open',''); };
   request.mockImplementation(async (path: string, options?: RequestInit) => {
+    if (path==='/setup/status') return true;
     if (path==='/auth/me') return user;
     if (path==='/conversations') return rows;
     if (options?.method==='DELETE') { rows=rows.filter(c=>path!==`/conversations/${c.id}`); return {ok:true}; }

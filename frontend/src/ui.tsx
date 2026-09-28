@@ -1,20 +1,27 @@
 import { useEffect, useState, useRef, useId } from 'react';
 import type { ReactNode, FormEvent } from 'react';
 import { LoaderCircle, AlertCircle, Inbox, X, CheckCircle2 } from 'lucide-react';
-import useSWR from 'swr';
 import { api, errorText } from './api';
 
-export function useData<T>(path: string | null) {
-  const { data, error, isLoading, mutate } = useSWR<T>(path, async (p: string) => {
-    return api(p) as Promise<T>;
-  });
-
-  return {
-    data: data ?? null,
-    loading: isLoading,
-    error: error ? errorText(error) : '',
-    reload: () => mutate()
-  };
+export function useData<T>(path: string | null, refreshInterval = 0) {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(!!path);
+  const [error, setError] = useState('');
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    setData(null); setError(''); setLoading(!!path);
+    async function load() {
+      if (!path) return;
+      try { const result = await api<T>(path, { signal: controller.signal }); if (!controller.signal.aborted) { setData(result); setError(''); } }
+      catch (e) { if (!controller.signal.aborted) { setError(errorText(e)); setData(null); } }
+      finally { if (!controller.signal.aborted) { setLoading(false); if (refreshInterval) timer = setTimeout(load, refreshInterval); } }
+    }
+    void load();
+    return () => { controller.abort(); if (timer) clearTimeout(timer); };
+  }, [path, revision, refreshInterval]);
+  return { data, loading, error, reload: () => setRevision(v => v + 1) };
 }
 export function Feedback({ error, success }: { error?: string; success?: string }) { return <>{error && <div className="notice error" role="alert"><AlertCircle size={18}/>{error}</div>}{success && <div className="notice success" role="status"><CheckCircle2 size={18}/>{success}</div>}</>; }
 export function Loading() { return <div className="empty" role="status"><LoaderCircle className="spin" size={24}/><span>正在加载数据…</span></div>; }

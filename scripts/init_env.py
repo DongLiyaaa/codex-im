@@ -6,7 +6,7 @@ import secrets
 ROOT = Path(__file__).resolve().parents[1]
 target = ROOT / '.env'
 text = (ROOT / '.env.example').read_text()
-for key in ('POSTGRES_PASSWORD', 'SESSION_SECRET', 'RUNNER_TOKEN', 'BOOTSTRAP_ADMIN_PASSWORD'):
+for key in ('POSTGRES_PASSWORD', 'SESSION_SECRET', 'RUNNER_TOKEN'):
     lines = text.splitlines()
     text = '\n'.join(f'{key}={secrets.token_hex(24)}' if line.startswith(key + '=') else line for line in lines) + '\n'
 try:
@@ -15,4 +15,4 @@ except FileExistsError:
     raise SystemExit('.env 已存在，保留现有配置。')
 with os.fdopen(fd, 'w') as out:
     out.write(text)
-print(f'已创建 {target}；初始管理员凭据保存在其中，未输出密钥。')
+print('已创建 .env；未输出密钥。启动后在网页完成首次管理员注册。')

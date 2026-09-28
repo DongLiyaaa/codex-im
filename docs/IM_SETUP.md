@@ -73,9 +73,9 @@ uv pip install --python .venv/bin/python -r backend/requirements.txt -r backend/
 .venv/bin/python scripts/run_im_local.py --provider dingtalk
 ```
 
-每个平台仅运行一个监督进程，通过 PostgreSQL session advisory lock 强制互斥。`run_im_local.py` 加载 .env 中 IM/DATABASE_URL/SESSION_SECRET/IM_CONFIG_KEY 字段，默认使用本项目 `.runtime/pgsocket:55439`。数据库连接丢失会停止子进程并退出，需由服务管理器重新启动。SDK 子进程失败时每5秒重启；配置变更终止最长等待8秒，随后强制停止，避免新旧连接并行。Docker 内命令为 `python -m app.im_connections --provider feishu|dingtalk`。现有 Compose 尚未给 IM 服务传入加密主密钥，未来容器发布前必须给 API 与两个 IM 服务注入相同的 `IM_CONFIG_KEY`（或相同 `SESSION_SECRET` 派生源），否则网页保存后的密文无法被 IM 服务读取。本次只验证无容器本地部署。Compose `im` profile 提供两个独立服务，无发布端口；必须先人工审核 DOCKER_IMPACT.md，本文不表示已获启动许可。
+每个平台仅运行一个监督进程，通过 PostgreSQL session advisory lock 强制互斥。`run_im_local.py` 加载 .env 中 IM/DATABASE_URL/SESSION_SECRET/IM_CONFIG_KEY 字段，默认使用本项目 `.runtime/pgsocket:55439`。数据库连接丢失会停止子进程并退出，需由服务管理器重新启动。SDK 子进程失败时每5秒重启；配置变更终止最长等待8秒，随后强制停止，避免新旧连接并行。Docker 内命令为 `python -m app.im_connections --provider feishu|dingtalk`。现有 Compose 尚未给 IM 服务传入加密主密钥，未来容器发布前必须给 API 与两个 IM 服务注入相同的 `IM_CONFIG_KEY`（或相同 `SESSION_SECRET` 派生源），否则网页保存后的密文无法被 IM 服务读取。Compose `im` profile 提供两个独立服务，无发布端口；必须先人工审核 DOCKER_IMPACT.md，本文不表示已获启动许可。
 
-SDK 依赖独立在 `backend/requirements-im.txt`，固定 lark-oapi 1.7.3 / dingtalk-stream 0.24.3，websockets 为 `>=11,<16`，API/IM image 安装，runner image 不改。当前本机 API 和 runner 共用 `.venv`，本次 websockets 从 17.1 调整至 15.0.1；runner 回归需一起执行，未修改 OAuth 凭据。
+SDK 依赖独立在 `backend/requirements-im.txt`，固定 lark-oapi 1.7.3 / dingtalk-stream 0.24.3，websockets 为 `>=11,<16`，API/IM image 安装，runner image 不改。API 与 runner 如共用虚拟环境，升级依赖后应一起执行回归。
 
 ## 状态、事务与安全边界
 
@@ -111,7 +111,7 @@ legacy 回调仍为 `/api/im/feishu/callback`、`/api/im/dingtalk/callback`，�
 PYTHONPATH=backend .venv/bin/python -m pytest tests backend/tests runner/test_runner.py -q
 ```
 
-测试使用本项目真实 PostgreSQL 的临时独立 schema，验证适配器并发去重、群和单聊、未知身份/撤权/跨组织拒绝、回滚、SDK 字段、连接状态过期、HTTP 模式隔离，以及 MockTransport 出站结构/token缓存/失败名单。不会发送真实平台消息。真实验收仍需应用凭据、平台发布/审批完成和员工自然发送事件；由管理员配置后验证私聊、群 @、重复推送及撤权后不回复。本次未主动发送平台消息，不能把 mock 成功当作打通。
+测试使用本项目真实 PostgreSQL 的临时独立 schema，验证适配器并发去重、群和单聊、未知身份/撤权/跨组织拒绝、回滚、SDK 字段、连接状态过期、HTTP 模式隔离，以及 MockTransport 出站结构/token缓存/失败名单。不会发送真实平台消息。真实验收仍需应用凭据、平台发布/审批完成和员工自然发送事件；由管理员配置后验证私聊、群 @、重复推送及撤权后不回复。模拟测试成功不代表平台已打通。
 
 ## 官方来源
 
