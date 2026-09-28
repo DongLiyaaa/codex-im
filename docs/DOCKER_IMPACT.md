@@ -1,11 +1,11 @@
 # Docker 影响清单（创建/启动前待人工审核）
 
-本项目没有执行 Docker build / compose up / docker run。检查日期：2026-09-27。
+创建或启动前，按实际部署环境核查以下影响。
 
 |项目|新服务配置|对现有容器的影响与边界|
 |---|---|---|
 |项目名|codex-hub-v1|独立 Compose 项目；不复用现有项目名|
-|端口|127.0.0.1:18200（网页与API）|初查空闲，现由本项目本地预览占用，容器启动前需停止该预览；不占用18080、18100、18120、6379、55432；PG/runner不发布端口|
+|端口|127.0.0.1:18200（网页与API）|启动前确认端口空闲；如被开发预览占用，应明确停止目标进程或调整映射；PG/runner不发布端口|
 |网络|codex-hub-v1_hub_data / hub_runner / hub_egress|新网络；不加入任何已有网络；PG仅内部网络|
 |卷|codex-hub-v1_hub_pgdata|新PG卷；不读取或修改已有卷|
 |镜像|项目api/runner镜像、postgres:16.14-bookworm|不覆盖已有镜像标签；新增磁盘占用|
@@ -18,6 +18,6 @@
 |外部服务|runner访问OpenAI和已授权HTTPS MCP；API访问IM|需要独立凭据；默认无凭据，不会自动发送IM消息|
 |安全|非root、只读根文件系统、cap_drop、no-new-privileges|Codex Linux沙箱兼容性需要容器运行验证；不得为解决兼容性静默启用privileged|
 
-人工审核此表后，在项目目录执行 `docker compose --env-file .env config --quiet`，再执行 `docker compose --env-file .env up -d --build`。本次实现阶段只准备和静态验证配置。
+人工审核此表后，在项目目录执行 `docker compose --env-file .env config --quiet`，再执行 `docker compose --env-file .env up -d --build`。静态校验不能替代镜像和运行验收。
 
 停止只用本目录 `docker compose down`，不加 `-v`；数据库备份和卷删除需要独立决定。不要运行全局docker prune。

@@ -19,6 +19,19 @@ class Login(Input):
         return value.lower()
 
 
+class SetupAdmin(Login):
+    name: str = Field(min_length=1, max_length=200)
+    password: str = Field(min_length=12, max_length=1024)
+
+    @field_validator('email')
+    @classmethod
+    def valid_email(cls, value):
+        import re
+        if not re.fullmatch(r"[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+", value):
+            raise ValueError('Invalid email')
+        return value
+
+
 class UserCreate(Login):
     name: str = Field(min_length=1, max_length=200)
     role: Literal['super_admin', 'org_admin', 'team_lead', 'member']
