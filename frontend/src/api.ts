@@ -5,15 +5,16 @@ export interface Group { can_edit?: boolean; can_delete?: boolean; org_name?: st
 export interface Resource { id: ID; name: string; kind: 'skill' | 'mcp'; description: string; org_id: ID | null; enabled: boolean; config: Record<string, unknown> }
 export interface Binding { id: ID; subject_type: 'user' | 'group'; subject_id: ID; resource_id: ID }
 export interface Conversation { can_delete?: boolean; id: ID; title: string; owner_id: ID; group_id?: ID | null; created_at: string }
-export interface Message { id: ID; conversation_id: ID; role: string; content: string; created_at: string }
-export interface Run { id: ID; message_id: ID; provider?: 'web' | 'feishu' | 'dingtalk'; status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'; error?: string; created_at: string }
+export interface Attachment { id: string; filename: string; size: number; mime: string; status: 'received' | 'fetching' | 'parsing' | 'ready' | 'failed' | 'revoked'; error?: string | null }
+export interface Message { platform_authorization?: { provider: 'feishu' | 'dingtalk'; state: string; can_open: boolean } | null; attachments?: Attachment[]; id: ID; conversation_id: ID; role: string; content: string; created_at: string }
+export interface Run { id: ID; message_id: ID; provider?: 'web' | 'feishu' | 'dingtalk'; status: 'waiting_attachments' | 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'; error?: string; created_at: string }
 export interface ConversationState { messages: Message[]; active_run: Run | null; latest_run: Run | null }
 export interface Identity { id: ID; provider: string; external_user_id: string; user_id: ID }
 export const roles: Record<Role, string> = { super_admin: '超级管理员', org_admin: '组织管理员', team_lead: '团队负责人', member: '成员' };
 export const sameId = (a: ID | null | undefined, b: ID | null | undefined) => a != null && b != null && String(a) === String(b);
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`/api${path}`, { ...options, credentials: 'same-origin', headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
+  const response = await fetch(`/api${path}`, { ...options, credentials: 'same-origin', headers: { ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
   const text = await response.text();
   let data: unknown;
   try { data = text ? JSON.parse(text) : null; } catch { throw new ApiError(response.status, '服务器返回了无法解析的响应，请确认 API 服务及代理配置。'); }

@@ -19,7 +19,7 @@ from . import policy, schemas, service, im_settings
 @asynccontextmanager
 async def lifespan(app):
     session_secret()
-    Base.metadata.create_all(engine, tables=[table for table in Base.metadata.sorted_tables if table.name not in ('im_reactions', 'organizations', 'departments')])
+    Base.metadata.create_all(engine, tables=[table for table in Base.metadata.sorted_tables if table.name not in ('im_reactions', 'organizations', 'departments', 'platform_settings', 'platform_auth_jobs', 'platform_auth_requests')])
     from .im_migrations import migrate
     migrate(engine)
     with SessionLocal.begin() as db:
@@ -36,11 +36,21 @@ async def lifespan(app):
     worker = service.Worker()
     worker.start()
     app.state.worker = worker
+    from .platform_worker import AuthWorker
+    auth_worker = AuthWorker()
+    auth_worker.start()
     yield
+    auth_worker.stop()
     worker.stop()
 
 
 app = FastAPI(title='Agent Hub API', lifespan=lifespan)
+from .platform_bridge import router as platform_router
+from .attachments import router as attachment_router
+from .attachment_bridge import router as attachment_bridge_router
+app.include_router(attachment_bridge_router)
+app.include_router(attachment_router)
+app.include_router(platform_router)
 
 
 @app.middleware('http')
@@ -53,7 +63,7 @@ async def guard_origin(request: Request, call_next):
     response = await call_next(request)
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'same-origin'
-    if request.url.path.startswith('/api/'):
+    if request.url.path.startswith(('/api/', '/internal/platform-mcp')):
         response.headers['Cache-Control'] = 'no-store'
     return response
 
@@ -62,7 +72,7 @@ async def guard_origin(request: Request, call_next):
 async def validation_error(request, exc):
     if request.url.path.startswith('/api/setup') or request.url.path == '/api/auth/login':
         return JSONResponse({'detail': 'Invalid authentication request'}, status_code=422)
-    if request.url.path.startswith('/api/integrations/config/'):
+    if request.url.path.startswith(('/api/integrations/config/', '/api/integrations/oauth/')):
         return JSONResponse({'detail': 'Invalid IM configuration request'}, status_code=422)
     return await request_validation_exception_handler(request, exc)
 
@@ -328,7 +338,10 @@ def create_conversation(body: schemas.ConversationCreate, actor=Depends(current_
 @app.get('/api/conversations/{identifier}/messages', response_model=list[schemas.MessageOut])
 def messages(identifier: str, actor=Depends(current_user), db=Depends(get_db)):
     read_conversation(db, actor, identifier)
-    return list(db.scalars(select(Message).where(Message.conversation_id == identifier).order_by(Message.created_at, Message.id)))
+    from .attachments import for_message
+    entries = list(db.scalars(select(Message).where(Message.conversation_id == identifier).order_by(Message.created_at, Message.id)))
+    from .platform_broker import markers
+    return markers(db, actor, [schemas.MessageOut.model_validate(m).model_dump() | {'attachments': for_message(db, m.id)} for m in entries])
 
 
 @app.get('/api/conversations/{identifier}/state', response_model=schemas.ConversationStateOut)
@@ -346,14 +359,17 @@ def conversation_state(identifier: str, actor=Depends(current_user), db=Depends(
                                            provider=provider if provider in ('feishu', 'dingtalk') else 'web')
     entries = list(db.scalars(select(Message).where(Message.conversation_id == identifier)
                              .order_by(Message.created_at, Message.id)))
+    from .attachments import for_message
+    from .platform_broker import markers
+    entries = markers(db, actor, [schemas.MessageOut.model_validate(m).model_dump() | {'attachments': for_message(db, m.id)} for m in entries])
     return {'messages': entries, 'latest_run': latest,
-            'active_run': latest if latest and latest.status in ('queued', 'running') else None}
+            'active_run': latest if latest and latest.status in ('queued', 'running', 'waiting_attachments') else None}
 
 
 @app.post('/api/conversations/{identifier}/messages', status_code=202)
 def send_message(identifier: str, body: schemas.MessageCreate, actor=Depends(current_user), db=Depends(get_db)):
     conversation = get_or_404(db, Conversation, identifier)
-    return service.enqueue_message(db, actor, conversation, body.content)
+    return service.enqueue_message(db, actor, conversation, body.content, body.attachment_ids)
 
 
 @app.get('/api/runs/{identifier}', response_model=schemas.RunOut)

@@ -148,7 +148,7 @@ def recover(factory=None):
         with factory() as db:
             ids = list(db.scalars(select(IMEvent.run_id).join(IMReaction, IMReaction.event_id == IMEvent.id)
                 .join(Run, Run.id == IMEvent.run_id).where(IMReaction.state != 'cleared',
-                    Run.status.notin_(['queued', 'running']), IMReaction.updated_at < now() - timedelta(seconds=30)).limit(20)))
+                    Run.status.notin_(['queued', 'running', 'waiting_attachments']), IMReaction.updated_at < now() - timedelta(seconds=30)).limit(20)))
         for run_id in ids:
             process(run_id, factory=factory)
     except Exception:
