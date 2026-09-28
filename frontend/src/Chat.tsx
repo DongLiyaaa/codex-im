@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Bot, Send, Plus, Search, LockKeyhole, MessageSquare, Sparkles, Plug, RefreshCw, LoaderCircle, CircleAlert, Trash2 } from 'lucide-react';
 import { api, post, sameId, dateText, errorText, ApiError } from './api';
-import type { User, Group, Conversation, Message, Resource, Run, ID, ConversationState } from './api';
+import type { User, Group, Conversation, Message, Resource, Run, ID, ConversationState, Attachment } from './api';
+import { AuthorizationCard } from './AuthorizationCard';
 import { MessageWorkStatus } from './MessageWorkStatus';
 import { useData, Loading, Empty, Feedback, Modal, Form, Field, value, Badge } from './ui';
 
@@ -21,6 +22,11 @@ export function Chat({ user, conversationId, onSelect }: { user: User; conversat
 
   const [draft, setDraft] = useState(''); const [sending, setSending] = useState(false); const [denied, setDenied] = useState(false); const [sendError, setSendError] = useState('');
 
+  const [files, setFiles] = useState<Attachment[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState('');
+  const uploadLock = useRef(false);
+  const attachmentStatus: Record<string, string> = { received: '等待解析', fetching: '下载中', parsing: '解析中', ready: '已就绪', failed: '处理失败', revoked: '已移除' };
   const [stateData, setStateData] = useState<ConversationState | null>(null);
   const [stateError, setStateError] = useState('');
   const [stateRevision, setStateRevision] = useState(0);
@@ -53,7 +59,40 @@ export function Chat({ user, conversationId, onSelect }: { user: User; conversat
   const loading = !stateData && !stateError && !!selected;
   const error = stateError ? errorText(stateError) : sendError;
 
-  const busy = sending || run?.status === 'queued' || run?.status === 'running';
+  const busy = sending || uploading || run?.status === 'waiting_attachments' || run?.status === 'queued' || run?.status === 'running';
+  useEffect(() => {
+    if (!selected || !files.length || files.every(f => ['ready', 'failed', 'revoked'].includes(f.status))) return;
+    const id = selected.id; const epoch = selectionEpoch.current;
+    const timer = setInterval(() => { void api<Attachment[]>(`/conversations/${encodeURIComponent(id)}/attachments`).then(rows => {
+      if (sameId(activeId.current, id) && selectionEpoch.current === epoch) setFiles(previous => previous.map(f => rows.find(r => r.id === f.id) ?? f));
+    }).catch(e => { if (sameId(activeId.current, id)) setSendError(errorText(e)); }); }, 2000);
+    return () => clearInterval(timer);
+  }, [selected?.id, files]);
+
+  async function uploadFiles(chosen: FileList | null) {
+    if (!chosen || !selected || !writable || busy || uploadLock.current) return;
+    const batch = Array.from(chosen); const id = selected.id; const epoch = selectionEpoch.current;
+    if (batch.length + files.length > 5) { setSendError('每条消息最多5个附件'); return; }
+    if (batch.some(f => f.size > 20 * 1024 * 1024 || f.size === 0)) { setSendError('单个附件须非空且不超过20MiB'); return; }
+    uploadLock.current = true; setUploading(true); setSendError('');
+    try {
+      for (const [index, file] of batch.entries()) {
+        if (!sameId(activeId.current, id) || selectionEpoch.current !== epoch) break;
+        setProgress(`正在上传 ${index + 1}/${batch.length}：${file.name}`);
+        const form = new FormData(); form.append('file', file);
+        const result = await api<Attachment>(`/conversations/${encodeURIComponent(id)}/attachments`, { method: 'POST', body: form });
+        if (sameId(activeId.current, id) && selectionEpoch.current === epoch) setFiles(previous => [...previous, result]);
+      }
+    } catch (e) { if (sameId(activeId.current, id)) setSendError(errorText(e)); }
+    finally { uploadLock.current = false; setUploading(false); setProgress(''); }
+  }
+
+  async function removeFile(file: Attachment) {
+    if (!selected || busy) return;
+    const id = selected.id;
+    try { await api(`/conversations/${encodeURIComponent(id)}/attachments/${file.id}`, { method: 'DELETE' }); if (sameId(activeId.current, id)) setFiles(previous => previous.filter(f => f.id !== file.id)); }
+    catch (e) { setSendError(errorText(e)); }
+  }
 
   useEffect(() => {
     if (!conversations.data || conversations.loading) return;
@@ -79,20 +118,20 @@ export function Chat({ user, conversationId, onSelect }: { user: User; conversat
   }
 
   useEffect(() => {
-    activeId.current = selected?.id ?? null; setDraft(''); setDenied(false); setSendError(''); requestVersion.current++; selectionEpoch.current++;
+    activeId.current = selected?.id ?? null; setFiles([]); setDraft(''); setDenied(false); setSendError(''); requestVersion.current++; selectionEpoch.current++;
   }, [selected?.id]);
 
   useEffect(() => { bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages.length, selected?.id]);
 
   async function send() {
-    if (!selected || !draft.trim() || !writable || denied || busy || sendLock.current) return;
+    if (!selected || (!draft.trim() && !files.length) || files.some(f => f.status !== 'ready') || !writable || denied || busy || sendLock.current) return;
     const id = selected.id; const epoch = selectionEpoch.current; const content = draft.trim(); sendLock.current = true; requestVersion.current++; setSending(true); setSendError('');
     try {
-      await post<{ user_message: Message; run: Run }>(`/conversations/${encodeURIComponent(id)}/messages`, { content });
+      await post<{ user_message: Message; run: Run }>(`/conversations/${encodeURIComponent(id)}/messages`, { content, ...(files.length ? { attachment_ids: files.map(f => f.id) } : {}) });
       requestVersion.current++;
       if (sameId(activeId.current, id) && selectionEpoch.current === epoch) {
         setStateRevision(v => v + 1);
-        setDraft('');
+        setDraft(''); setFiles([]);
       }
     } catch (e) { if (sameId(activeId.current, id) && selectionEpoch.current === epoch) { setSendError(errorText(e)); if (e instanceof ApiError && e.status === 403) setDenied(true); } }
     finally { sendLock.current = false; setSending(false); }
@@ -100,7 +139,7 @@ export function Chat({ user, conversationId, onSelect }: { user: User; conversat
 
   const filtered = conversations.data?.filter(c => c.title.toLowerCase().includes(search.toLowerCase())) ?? [];
   return <div className="chat-layout"><aside className="conversation-panel"><div className="conversation-heading"><h2>会话</h2><button className="icon-button" aria-label="创建会话" onClick={() => setOpen(true)}><Plus size={19}/></button></div><label className="search"><Search size={16}/><input aria-label="搜索会话" placeholder="搜索会话…" value={search} onChange={e => setSearch(e.target.value)}/></label><Feedback error={conversations.error}/><div className="conversation-list">{conversations.loading ? <Loading/> : filtered.length ? filtered.map(c => <div className="conversation-row" key={c.id}><button className={`conversation-item ${sameId(selected?.id, c.id) ? 'selected' : ''}`} key={c.id} onClick={() => selectConversation(c)}><MessageSquare size={18}/><div><strong>{c.title}</strong><span>{c.group_id ? '群组会话' : sameId(c.owner_id, user.id) ? '我的会话' : '监管会话 · 只读'}</span></div></button>{c.can_delete && <button className="icon-button" aria-label={`移除会话 ${c.title}`} title="从工作台移除，保留历史与审计" onClick={() => { setDeleteError(''); setDeleting(c); }}><Trash2 size={16}/></button>}</div>) : <Empty text={search ? '没有匹配会话' : '暂无会话'} description="点击上方加号创建会话。"/>}</div><button className="text-button list-refresh" onClick={conversations.reload}><RefreshCw size={14}/>刷新会话列表</button></aside>
-  <section className="chat-main">{selected ? <><div className="chat-header"><div><h2>{selected.title}</h2><span>{selected.group_id ? group?.name ?? '群组会话' : '私聊会话'} · {writable && !denied ? '协作空间' : '只读监管'}</span></div><button className="icon-button" aria-label="刷新消息与能力" onClick={() => { setStateRevision(v => v + 1); reloadCap(); }} disabled={loading}><RefreshCw size={18}/></button></div><div className="message-list" aria-live="polite">{loading ? <Loading/> : messages.length ? messages.map(m => <article key={m.id} className={`message ${m.role === 'user' ? 'from-user' : ''}`}><span className="message-avatar">{m.role === 'assistant' ? <Bot size={20}/> : m.role === 'user' ? <MessageSquare size={18}/> : <CircleAlert size={18}/>}</span><div className="message-body"><div className="message-meta"><strong>{m.role === 'assistant' ? 'Agent' : m.role === 'user' ? '用户' : '系统'}</strong><time>{dateText(m.created_at)}</time></div><div className="bubble">{m.content}</div><MessageWorkStatus message={m} messages={messages} run={run}/></div></article>) : <div className="chat-welcome"><span className="agent-symbol"><Bot size={34}/></span><h2>今天，我们一起完成什么？</h2><p>描述你的目标，Agent 将使用当前授权的能力处理任务。</p><span>所有消息与运行结果均来自真实服务</span></div>}<div ref={bottom}/></div><div className="composer-area"><Feedback error={error}/>{run && ['failed', 'cancelled', 'interrupted'].includes(run.status) && <div className="run-state failed" role="alert"><CircleAlert size={16}/><span>任务{run.status === 'failed' ? '执行失败' : '已中断'}{run.error ? `：${run.error}` : ''}</span></div>}{(!writable || denied) && <div className="notice"><LockKeyhole size={16}/>{selected.group_id && groups.loading ? '正在核验群成员权限…' : '当前会话仅供监管查看，不能代替用户发送消息。'}</div>}{selected.group_id && <Feedback error={groups.error}/>}<form className="composer" onSubmit={e => { e.preventDefault(); void send(); }}><textarea aria-label="消息内容" maxLength={16000} value={draft} onChange={e => setDraft(e.target.value)} disabled={!writable || denied || busy || loading} rows={3} placeholder={writable && !denied ? '输入任务或问题，开始与 Agent 协作…' : '只读会话，无法发送消息'} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }}/><div className="composer-bottom"><span>Enter 发送 · Shift + Enter 换行</span><button className="primary" type="submit" disabled={!draft.trim() || !writable || denied || busy || loading}>{sending ? <LoaderCircle size={16} className="spin"/> : <Send size={16}/>}发送</button></div></form><small className="composer-hint">Agent 输出请结合业务事实核实。资源权限将在执行前再次校验。</small></div></> : <Empty text="选择或创建会话" description="在左侧开启你的第一段智能协作。"/>}</section>
+  <section className="chat-main">{selected ? <><div className="chat-header"><div><h2>{selected.title}</h2><span>{selected.group_id ? group?.name ?? '群组会话' : '私聊会话'} · {writable && !denied ? '协作空间' : '只读监管'}</span></div><button className="icon-button" aria-label="刷新消息与能力" onClick={() => { setStateRevision(v => v + 1); reloadCap(); }} disabled={loading}><RefreshCw size={18}/></button></div><div className="message-list" aria-live="polite">{loading ? <Loading/> : messages.length ? messages.map(m => <article key={m.id} className={`message ${m.role === 'user' ? 'from-user' : ''}`}><span className="message-avatar">{m.role === 'assistant' ? <Bot size={20}/> : m.role === 'user' ? <MessageSquare size={18}/> : <CircleAlert size={18}/>}</span><div className="message-body"><div className="message-meta"><strong>{m.role === 'assistant' ? 'Agent' : m.role === 'user' ? '用户' : '系统'}</strong><time>{dateText(m.created_at)}</time></div><div className="bubble">{m.content}{m.attachments?.map(f => <p key={f.id}>{f.filename} · {attachmentStatus[f.status]}{f.error ? `：${f.error}` : ''}</p>)}</div>{m.platform_authorization && <AuthorizationCard key={`${m.id}-${m.platform_authorization.state}`} provider={m.platform_authorization.provider} state={m.platform_authorization.state} canOpen={m.platform_authorization.can_open && writable && !denied}/>}<MessageWorkStatus message={m} messages={messages} run={run}/></div></article>) : <div className="chat-welcome"><span className="agent-symbol"><Bot size={34}/></span><h2>今天，我们一起完成什么？</h2><p>描述你的目标，Agent 将使用当前授权的能力处理任务。</p><span>所有消息与运行结果均来自真实服务</span></div>}<div ref={bottom}/></div><div className="composer-area"><Feedback error={error}/>{run && ['failed', 'cancelled', 'interrupted'].includes(run.status) && <div className="run-state failed" role="alert"><CircleAlert size={16}/><span>任务{run.status === 'failed' ? '执行失败' : '已中断'}{run.error ? `：${run.error}` : ''}</span></div>}{(!writable || denied) && <div className="notice"><LockKeyhole size={16}/>{selected.group_id && groups.loading ? '正在核验群成员权限…' : '当前会话仅供监管查看，不能代替用户发送消息。'}</div>}{selected.group_id && <Feedback error={groups.error}/>}<form className="composer" onSubmit={e => { e.preventDefault(); void send(); }}>{files.map(f => <div className="notice" key={f.id}><span>{f.filename} · {Math.ceil(f.size / 1024)} KB · {attachmentStatus[f.status]}{f.error ? `：${f.error}` : ''}</span><button type="button" className="text-button" disabled={busy} aria-label={`移除附件 ${f.filename}`} onClick={() => void removeFile(f)}>移除</button></div>)}{uploading && <p role="status">{progress}</p>}<textarea aria-label="消息内容" maxLength={16000} value={draft} onChange={e => setDraft(e.target.value)} disabled={!writable || denied || busy || loading} rows={3} placeholder={writable && !denied ? '输入任务或问题，开始与 Agent 协作…' : '只读会话，无法发送消息'} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }}/><div className="composer-bottom"><label>添加附件<input aria-label="上传附件" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.pdf,.docx,.xlsx,.csv,.txt" disabled={!writable || denied || busy || loading || files.length >= 5} onChange={e => { void uploadFiles(e.target.files); e.target.value = ''; }}/></label><span>最多5个，每个20MiB</span><button className="primary" type="submit" disabled={(!draft.trim() && !files.length) || files.some(f => f.status !== 'ready') || !writable || denied || busy || loading}>{sending ? <LoaderCircle size={16} className="spin"/> : <Send size={16}/>}发送</button></div></form><small className="composer-hint">Agent 输出请结合业务事实核实。资源权限将在执行前再次校验。</small></div></> : <Empty text="选择或创建会话" description="在左侧开启你的第一段智能协作。"/>}</section>
   <aside className="capability-panel"><div className="conversation-heading"><h2>当前能力</h2><ShieldIcon/></div><p className="muted">由当前会话的有效授权决定</p>{!selected ? <Empty text="尚未选择会话" description="选择后查看可用能力。"/> : capLoading ? <Loading/> : <><Feedback error={capError ? errorText(capError) : ''}/>{(['skills', 'mcps'] as const).map(type => <div className="capability-section" key={type}><h3>{type === 'skills' ? <Sparkles size={16}/> : <Plug size={16}/>} {type === 'skills' ? 'Skills 技能' : 'MCP 服务'}<Badge>{capData?.[type]?.length ?? 0}</Badge></h3>{capData?.[type]?.length ? capData[type].map((r, index) => <div className="capability" key={r.id ?? index}><strong>{r.name}</strong><p>{r.description || (type === 'skills' ? '已授权技能' : '已授权远程服务')}</p></div>) : <p className="small-empty">{capError ? '未能获取能力数据' : '暂无可用授权'}</p>}</div>)}<div className="capability-note"><LockKeyhole size={18}/><p>群聊能力取用户授权与群组授权的交集。已禁用资源不会参与执行。</p></div></>}</aside>
   {deleting && <Modal title="从工作台移除会话" close={() => { if (!deleteLock.current) setDeleting(null); }}><p>确认移除“{deleting.title}”（{deleting.group_id ? '群组会话，对所有可见成员生效' : '个人私聊'}）？</p><p>此操作将会话归档并从工作台移除，保留历史消息、运行记录及审计，不清除飞书或钉钉平台聊天。IM 后续新消息可开启新会话；旧消息不会重放。</p><Feedback error={deleteError}/><div className="form-actions"><button className="secondary" disabled={deleteBusy} onClick={() => setDeleting(null)}>取消</button><button className="primary" disabled={deleteBusy} onClick={() => void removeConversation()}>{deleteBusy ? '正在移除…' : '确认移除'}</button></div></Modal>}
   {open && <Modal title="创建智能会话" close={() => setOpen(false)}><Form submit={async f => { const groupId = value(f, 'group_id'); const result = await post<Conversation>('/conversations', { title: value(f, 'title'), ...(groupId ? { group_id: groups.data?.find(g => String(g.id) === groupId)?.id ?? groupId } : {}) }); freshSelection.current = String(result.id); selectConversation(result); }} onSuccess={() => { setOpen(false); conversations.reload(); }}><Field label="会话名称"><input name="title" required maxLength={160} placeholder="例如：本周运营分析"/></Field><Field label="会话类型"><select name="group_id" defaultValue=""><option value="">个人私聊</option>{groups.data?.filter(g => g.member_ids.some(id => sameId(id, user.id))).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></Field><Feedback error={groups.error}/>{groups.loading && <Loading/>}<p className="muted">群聊仅显示你已加入的群组。</p></Form></Modal>}</div>;

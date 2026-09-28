@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { Page } from './Management';
 import type { User } from './api';
 export type Route = { page: Page; conversationId: string | null };
-const pages = new Set(['directory', 'overview', 'chat', 'users', 'groups', 'resources', 'bindings', 'integrations', 'audit']);
+const pages = new Set(['connections', 'directory', 'overview', 'chat', 'users', 'groups', 'resources', 'bindings', 'integrations', 'audit']);
 export function readRoute(hash = window.location.hash): Route {
   const match = /^#\/([^/?]+)(?:\/([^/?]+))?$/.exec(hash);
   if (!match || !pages.has(match[1]) || (match[2] && match[1] !== 'chat')) return { page: 'overview', conversationId: null };

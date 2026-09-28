@@ -30,6 +30,20 @@ def payload(**kwargs):
     return m.Execute(run_id="r", conversation_id="c", prompt="hello", **kwargs)
 
 
+def test_fixed_platform_bridge_keeps_private_mcp_forbidden(tmp_path, monkeypatch):
+    monkeypatch.setenv('PLATFORM_BRIDGE_URL', 'http://127.0.0.1:18200/internal/platform-mcp')
+    capability = 'test.' + 'a' * 64
+    _, env = m.prepare(tmp_path, payload(platform_capability=capability), 'key')
+    config = tomllib.loads((Path(env['CODEX_HOME']) / 'config.toml').read_text())
+    assert config['mcp_servers']['hub_personal_platforms']['url'] == 'http://127.0.0.1:18200/internal/platform-mcp'
+    assert capability not in config['developer_instructions']
+    assert 'PLATFORM_BRIDGE_KEY' not in env
+    with pytest.raises(ValueError):
+        m.MCP(name='private', url='http://127.0.0.1:18200/internal/platform-mcp')
+    with pytest.raises(ValueError):
+        m.Execute(run_id='r', conversation_id='c', prompt='x', platform_url='http://other/')
+
+
 def test_auth_and_validation_do_not_echo_secrets():
     with TestClient(m.app) as client:
         assert client.post("/execute", json={}).status_code == 401

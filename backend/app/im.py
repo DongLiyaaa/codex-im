@@ -167,11 +167,11 @@ def configuration(provider):
             'state': 'missing_credentials' if missing else ('webhook_configured' if mode == 'webhook' else 'connection_unobserved')}
 
 
-def _enqueue(db, provider, event_id, sender_id, chat_id, content, is_group, reply_mode='webhook', nickname=None, ingress_reason=None):
+def _enqueue(db, provider, event_id, sender_id, chat_id, content, is_group, reply_mode='webhook', nickname=None, ingress_reason=None, attachment_refs=None):
     from .service import enqueue_message
     from . import im_discovery
     event_id, sender_id, chat_id = (_text(event_id, 256), _text(sender_id, 200), _text(chat_id, 200))
-    content = _text(content)
+    content = _text(content) if content or not attachment_refs else ''
     app_scope = im_discovery.scope(provider)
     # Store only a scoped digest; rejected event tombstones prevent later replay.
     raw_message_id = event_id
@@ -201,11 +201,16 @@ def _enqueue(db, provider, event_id, sender_id, chat_id, content, is_group, repl
     if not policy.can_read_conversation(db, user, conversation) or not policy.can_send_conversation(db, user, conversation):
         _reject()
     event = IMEvent(provider=provider, event_id=event_id,
-                    reply_target={'app_scope': app_scope, 'reply_mode': reply_mode, 'chat_id': chat_id, 'sender_id': sender_id, 'user_id': user.id,
+                    reply_target={'app_scope': app_scope, 'reply_mode': reply_mode, 'chat_type': 'group' if is_group else 'p2p', 'chat_id': chat_id, 'sender_id': sender_id, 'user_id': user.id,
                                   'conversation_id': conversation.id, 'group_id': group.id if group else None})
     db.add(event)
     db.flush()
-    result = enqueue_message(db, user, conversation, content)
+    if attachment_refs:
+        from .attachment_ingress import register
+        identifiers = register(db, user, conversation, provider, app_scope, attachment_refs)
+        result = enqueue_message(db, user, conversation, content, identifiers)
+    else:
+        result = enqueue_message(db, user, conversation, content)
     run = result['run']
     event.run_id = run['id'] if isinstance(run, dict) else run.id
     if provider == 'feishu':
@@ -236,12 +241,17 @@ async def _feishu_callback(request, db):
         if header.get('event_type') != 'im.message.receive_v1':
             return {'ok': True, 'ignored': True}
         message, sender = event['message'], event['sender']
-        if message.get('message_type') != 'text' or sender.get('sender_type') != 'user':
+        if sender.get('sender_type') != 'user':
+            return {'ok': True, 'ignored': True}
+        from .attachment_ingress import feishu
+        content, refs = feishu(message)
+        if content is None:
             return {'ok': True, 'ignored': True}
         if message.get('chat_type') not in ('group', 'p2p'):
             _reject(400)
+        options = {'attachment_refs': refs} if refs else {}
         return _enqueue(db, 'feishu', message['message_id'], sender['sender_id']['open_id'],
-                        message['chat_id'], _object(message['content'])['text'], message['chat_type'] == 'group')
+                        message['chat_id'], content, message['chat_type'] == 'group', **options)
     except (KeyError, TypeError, AttributeError):
         _reject(400)
 
@@ -263,7 +273,9 @@ async def _dingtalk_callback(request, db):
     verify_dingtalk(request.headers)
     payload = _object(raw)
     try:
-        if payload.get('msgtype') != 'text':
+        from .attachment_ingress import dingtalk
+        content, refs = dingtalk(payload)
+        if content is None:
             return {'ok': True, 'ignored': True}
         # Fixed webhook belongs to one group; it cannot reply to arbitrary conversations.
         if str(payload.get('conversationType')) not in ('1', '2'):
@@ -272,9 +284,10 @@ async def _dingtalk_callback(request, db):
         fixed_chat = _required('DINGTALK_ROBOT_CHAT_ID')
         _required('DINGTALK_ROBOT_ACCESS_TOKEN')
         return _enqueue(db, 'dingtalk', payload['msgId'], payload['senderStaffId'],
-                        payload['conversationId'], payload['text']['content'], is_group,
+                        payload['conversationId'], content, is_group,
                         nickname=payload.get('senderNick'),
-                        ingress_reason=None if is_group and payload['conversationId'] == fixed_chat else 'unsupported_reply_target')
+                        ingress_reason=None if is_group and payload['conversationId'] == fixed_chat else 'unsupported_reply_target',
+                        **({'attachment_refs': refs} if refs else {}))
     except (KeyError, TypeError, AttributeError):
         _reject(400)
 
