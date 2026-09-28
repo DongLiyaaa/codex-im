@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, afterEach, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
+import { Toaster } from 'sonner';
 import { AuditPanel } from './AuditPanel';
 import { Management } from './Management';
 import { DiscoveredGroups } from './DiscoveredGroups';
@@ -101,7 +102,7 @@ it('group shows names, saves members, retains failed edits and confirms archive'
  const group={id:'g',name:'群名',org_id:'o',org_name:'中文公司',team_id:'t',team_name:'广告部',member_ids:['u'],provider:'web',can_edit:true,can_delete:true};
  let fail=true;
  request.mockImplementation(async(p:string,o?:RequestInit)=>{if(o?.method==='PATCH' && fail)throw new Error('任务未结束');return p==='/groups'?[group]:p==='/users'?[user]:[];});
- render(<Management page="groups" user={{...user,id:'admin',role:'org_admin'}} navigate={vi.fn()}/>);
+ render(<><Toaster/><Management page="groups" user={{...user,id:'admin',role:'org_admin'}} navigate={vi.fn()}/></>);
  await screen.findByText('中文公司 / 广告部');fireEvent.click(screen.getByText('编辑'));fireEvent.change(screen.getByLabelText('群组名称'),{target:{value:'改名'}});
  fireEvent.click(screen.getByText('保存'));await screen.findByText('任务未结束');expect((screen.getByLabelText('群组名称') as HTMLInputElement).value).toBe('改名');
  fail=false;fireEvent.click(screen.getByText('保存'));await screen.findByText('群组已保存，成员权限立即更新。');

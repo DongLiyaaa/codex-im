@@ -23,11 +23,16 @@ async def lifespan(app):
     from .im_migrations import migrate
     migrate(engine)
     with SessionLocal.begin() as db:
-        email, password = os.getenv('BOOTSTRAP_ADMIN_EMAIL', '').strip().lower(), os.getenv('BOOTSTRAP_ADMIN_PASSWORD', '')
-        if email and password and not db.scalar(select(User.id).limit(1)):
-            if len(password) < 12 or '@' not in email:
-                raise RuntimeError('Bootstrap email/password invalid (password minimum 12)')
-            db.add(User(email=email, name='Super Admin', role='super_admin', password_hash=hash_password(password), active=True))
+        from .setup import initialized, create_admin
+        if not initialized(db):
+            email = os.getenv('BOOTSTRAP_ADMIN_EMAIL', '').strip().lower()
+            password = os.getenv('BOOTSTRAP_ADMIN_PASSWORD', '')
+            if email or password:
+                try:
+                    body = schemas.SetupAdmin(email=email, password=password, name='Super Admin')
+                except ValueError:
+                    raise RuntimeError('Bootstrap configuration invalid (valid email and password minimum 12 required)') from None
+                create_admin(db, body)
     worker = service.Worker()
     worker.start()
     app.state.worker = worker
@@ -55,6 +60,8 @@ async def guard_origin(request: Request, call_next):
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request, exc):
+    if request.url.path.startswith('/api/setup') or request.url.path == '/api/auth/login':
+        return JSONResponse({'detail': 'Invalid authentication request'}, status_code=422)
     if request.url.path.startswith('/api/integrations/config/'):
         return JSONResponse({'detail': 'Invalid IM configuration request'}, status_code=422)
     return await request_validation_exception_handler(request, exc)
@@ -85,6 +92,21 @@ def health(db=Depends(get_db)):
     from sqlalchemy import text
     db.execute(text('SELECT 1'))
     return {'status': 'ok'}
+
+
+@app.get('/api/setup/status', response_model=bool)
+def setup_status(db=Depends(get_db)):
+    from .setup import initialized
+    return initialized(db)
+
+
+@app.post('/api/setup/bootstrap', status_code=201)
+def setup_bootstrap(body: schemas.SetupAdmin, request: Request, db=Depends(get_db)):
+    from .setup import create_admin
+    rate_limit('setup:' + (request.client.host if request.client else 'unknown'))
+    create_admin(db, body)
+    db.commit()
+    return {'ok': True}
 
 
 @app.post('/api/auth/login', response_model=schemas.UserOut)
