@@ -1,0 +1,136 @@
+name: codex-hub-v1
+services:
+  db:
+    image: postgres:16.14-bookworm
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: hub
+      POSTGRES_DB: hub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - hub_pgdata:/var/lib/postgresql/data
+    networks: [hub_data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U hub -d hub']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    mem_limit: 768m
+    cpus: 1
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    environment:
+      DATABASE_URL: postgresql+psycopg://hub:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/hub
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@agent-hub.local}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD}
+      APP_ORIGIN: ${APP_ORIGIN:-http://127.0.0.1:18200}
+      RUNNER_URL: http://runner:8081
+      RUNNER_TOKEN: ${RUNNER_TOKEN:?Set RUNNER_TOKEN}
+      FEISHU_TRANSPORT: ${FEISHU_TRANSPORT:-webhook}
+      DINGTALK_TRANSPORT: ${DINGTALK_TRANSPORT:-webhook}
+      DINGTALK_CLIENT_ID: ${DINGTALK_CLIENT_ID:-}
+      DINGTALK_CLIENT_SECRET: ${DINGTALK_CLIENT_SECRET:-}
+      DINGTALK_ROBOT_CODE: ${DINGTALK_ROBOT_CODE:-}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_VERIFICATION_TOKEN: ${FEISHU_VERIFICATION_TOKEN:-}
+      FEISHU_ENCRYPT_KEY: ${FEISHU_ENCRYPT_KEY:-}
+      DINGTALK_APP_SECRET: ${DINGTALK_APP_SECRET:-}
+      DINGTALK_ROBOT_ACCESS_TOKEN: ${DINGTALK_ROBOT_ACCESS_TOKEN:-}
+      DINGTALK_ROBOT_SECRET: ${DINGTALK_ROBOT_SECRET:-}
+      DINGTALK_ROBOT_CHAT_ID: ${DINGTALK_ROBOT_CHAT_ID:-}
+    ports: ['127.0.0.1:18200:18200']
+    networks: [hub_data, hub_runner, hub_egress]
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp:size=64m,mode=1777]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 768m
+    cpus: 1
+  im-feishu:
+    profiles: [im]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    command: [python, -m, app.im_connections, --provider, feishu]
+    environment:
+      DATABASE_URL: postgresql+psycopg://hub:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/hub
+      FEISHU_TRANSPORT: ${FEISHU_TRANSPORT:-webhook}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+    networks: [hub_data, hub_egress]
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp:size=32m,mode=1777]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: on-failure
+    mem_limit: 384m
+    cpus: 0.5
+    pids_limit: 64
+  im-dingtalk:
+    profiles: [im]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    command: [python, -m, app.im_connections, --provider, dingtalk]
+    environment:
+      DATABASE_URL: postgresql+psycopg://hub:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/hub
+      DINGTALK_TRANSPORT: ${DINGTALK_TRANSPORT:-webhook}
+      DINGTALK_CLIENT_ID: ${DINGTALK_CLIENT_ID:-}
+      DINGTALK_CLIENT_SECRET: ${DINGTALK_CLIENT_SECRET:-}
+      DINGTALK_ROBOT_CODE: ${DINGTALK_ROBOT_CODE:-}
+    networks: [hub_data, hub_egress]
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp:size=32m,mode=1777]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: on-failure
+    mem_limit: 384m
+    cpus: 0.5
+    pids_limit: 64
+  runner:
+    build:
+      context: ./runner
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    environment:
+      RUNNER_TOKEN: ${RUNNER_TOKEN:?Set RUNNER_TOKEN}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CODEX_AUTH_MODE: ${CODEX_AUTH_MODE:-api}
+      CODEX_OAUTH_AUTH_FILE: ${CODEX_OAUTH_AUTH_FILE:-}
+      # Optional OAuth: mount only its dedicated writable directory (see README).
+      CODEX_MODEL: ${CODEX_MODEL:-}
+    networks: [hub_runner, hub_egress]
+    read_only: true
+    tmpfs: [/tmp:size=512m,mode=1777]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 1536m
+    cpus: 2
+    pids_limit: 192
+networks:
+  hub_data:
+    internal: true
+  hub_runner:
+    internal: true
+  hub_egress: {}
+volumes:
+  hub_pgdata: {}
