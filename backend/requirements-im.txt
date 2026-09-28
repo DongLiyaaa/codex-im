@@ -1,0 +1,4 @@
+# Install only in the API/IM environment, never the OAuth runner environment.
+lark-oapi==1.7.3
+dingtalk-stream==0.24.3
+websockets>=11,<16
