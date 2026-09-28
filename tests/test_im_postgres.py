@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 os.environ.setdefault('DATABASE_URL', 'postgresql+psycopg:///agent_hub_test?host=' + str(ROOT / '.runtime/pgsocket') + '&port=55439')
 os.environ.setdefault('SESSION_SECRET', 'test-secret-for-isolated-tests-only-32-chars')
 from app.models import Base, User, Group, Identity, Run, IMEvent
+from app import attachment_models  # Register additive tables before isolated schema creation.
 from app.im import _enqueue
 
 

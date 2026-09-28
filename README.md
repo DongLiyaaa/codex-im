@@ -2,9 +2,64 @@
 
 基于 Codex CLI、PostgreSQL、FastAPI 与 React 的 AI 协作工作台，支持角色权限、资源授权、聊天执行队列、审计与飞书/钉钉集成。
 
+## 个人平台连接与按需授权
+
+每位已登录员工可打开 `#/connections` 的「个人平台连接」。模型通过受控内部 MCP 调用 `get_platform_authorization_status(provider)` 和 `request_platform_authorization(provider)`，provider 仅允许 `feishu` / `dingtalk`。developer instruction 引导模型在用户需要受限文档时先查状态、按需请求；没有关键词自动触发器。当前个人授权工具**尚未接入在线文档/链接读取**；本次消息直接发送的文件由下述独立附件服务处理，无需个人 OAuth。授权成功后必须重新发送任务，不自动恢复此前操作。
+
+|平台|已核实官方版本和协议|要求与限制|
+|---|---|---|
+|飞书|lark-cli 1.0.96 支持 `auth login --no-wait --json`、`--device-code`；Hub 使用其固定官方设备 API|独立用户 OAuth 应用凭据、开通 `docx:document:readonly`；不使用默认 all / recommend 权限，也不继承机器人 token|
+|钉钉|dws 1.0.62 设备流输出是终端展示；Hub 使用其官方 device/code、flowId 轮询、用户授权码交换及 CLI 组织权限检查|独立 OAuth AppKey/AppSecret，组织对本人开通 CLI 数据访问；初始仅 `openid corpid` 身份权限，不批量申请推荐业务权限|
+
+协议来源：[飞书设备流 v1.0.96](https://github.com/larksuite/cli/blob/v1.0.96/internal/auth/device_flow.go)、[飞书端点](https://github.com/larksuite/cli/blob/v1.0.96/internal/auth/paths.go)、[钉钉设备流 v1.0.62](https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/blob/v1.0.62/internal/auth/device_flow.go)、[钉钉 OAuth 交换与组织检查](https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/blob/v1.0.62/internal/auth/oauth_helpers.go)。采用直接协议适配，运行时不启动平台 CLI，不依赖主机 HOME/XDG/Keychain，不安装主机工具、不读取管理员既有登录态。
+
+服务配置（本轮通过环境配置，个人应用凭据不与 IM 配置自动混用）：
+
+- backend：`PLATFORM_BRIDGE_KEY` 至少 32 字符随机秘密；`PLATFORM_FEISHU_CLIENT_ID`、`PLATFORM_FEISHU_CLIENT_SECRET`；`PLATFORM_DINGTALK_CLIENT_ID`、`PLATFORM_DINGTALK_CLIENT_SECRET`。
+- runner：`PLATFORM_BRIDGE_URL` 为部署者配置的单一内部服务地址，例如 `http://127.0.0.1:18200/internal/platform-mcp`。模型/请求不能指定此 URL；普通资源 MCP 仍要求公共 HTTPS 443。跨主机部署应使用受保护网络和 TLS；不向公网暴露 runner。
+- backend 可显式配置 Fernet 格式 `PLATFORM_AUTH_KEY`；未设置时从 `SESSION_SECRET` 按独立域派生。备份必须同时安全保存 PostgreSQL 密文和密钥，不能把数据库备份、密钥、设备码写入公开日志或版本库；轮换密钥前需迁移密文，否则须重新授权。
+- `APP_ORIGIN` 应为员工可达的 HTTPS Hub 地址。本地 localhost/127.0.0.1 不视为远端可用公网入口，IM 返回明确配置提示。
+
+缺配置或上游拒绝设备授权返回 `setup_required`，不会显示假连接。状态包括未连接、待授权、已连接、配置缺失、过期。本人可发起、刷新、取消或断开。设备材料只在本人登录 API 返回，响应 `no-store`；管理员监管历史及模型工具结果只能看到状态和不含材料的 Hub 入口，群聊不会收到直接 OAuth URL/code。页面不会代替用户点击同意。
+
+PG 以 `(user_id, provider)` 隔离，事务 advisory lock 串行重复发起；待授权请求幂等、按 interval 限制轮询、最多 900 秒过期。无内存进程依赖，重启后可继续刷新或明确过期。内部 capability 使用独立 HMAC 密钥，绑定 run/user/conversation、240 秒有效期和固定 audience；服务端只接受 running run，并重新核验用户活跃状态、会话、群成员及 IM 映射。工具不接收 userId，也不提供任意 CLI 命令。
+
+访问令牌仅加密保存，最多按官方返回的 7200 秒有效期保留。**本版不保存或自动使用 refresh token**，到期/401 后重新授权，不自动扩 scope。刷新已连接状态会验证平台身份/组织权限；断开和取消删除 Hub 当前密文，属于本地 logout，不声称撤销平台授权，历史加密备份也需按保留策略清理。彻底撤权需本人进入平台授权管理。设备授权没有浏览器回调路由，device code 与本人 PG 行绑定，不接收外来 callback/state。
+
+## 独立附件服务（阶段1）
+
+网页会话支持多文件上传和仅附件消息；上传完成后显示等待解析、解析中、已就绪或错误，发送前可移除。默认每文件20MiB、每消息5个，服务限制见 `.env.example` 的 `ATTACHMENT_*`；前端提示采用默认上限。附件原件位于项目私有 `.runtime/attachments`（可用 `ATTACHMENT_ROOT` 指定独立目录），不提供静态URL。目录0700，文件受私有目录保护；服务生成UUID路径并拒绝符号链接，用户文件名仅作展示。
+
+|格式|支持能力|限制|
+|---|---|---|
+|JPEG/PNG/WebP|Pillow验证、限制像素、去EXIF、规范化PNG，经可信runner `--image` 输入|默认2500万像素，缩放至4096边长；不读取其他本地路径|
+|PDF|pypdf文字层提取，保留页码|最多200页；含无文字层页面明确失败，尚无OCR；请将所需扫描页转为图片另发|
+|DOCX|正文段落、表格文字|逻辑块编号不是Word物理页码；页眉页脚、文本框与嵌入图像暂不提取|
+|XLSX|工作表、范围分块读取，公式表达式与缓存值区分|不执行公式/宏；缓存可能缺失或过期；默认10万单元格|
+|CSV/TXT|UTF-8/BOM UTF-16/GB18030严格解码，CSV表格识别|拒绝二进制控制字符与不支持格式；不执行CSV公式|
+|DOC/XLS|明确返回暂不支持|后续需要独立隔离转换，当前不启动Office转换器|
+
+PG独立保存 attachments、attachment_jobs、attachment_artifacts，并绑定message/run。草稿只对上传者可见，发送事务中行锁claim，禁止重复使用、跨会话及跨用户使用；群成员可查看已发送附件元数据，监管沿用会话只读策略并审计。模型只能读取本run绑定附件，不自动获得其他MCP能力。每次能力调用、下载、发布解析结果、执行与保存/发送回复重新验证原用户/群/IM应用授权。附件失效或解析失败时任务失败，不静默忽略附件。
+
+附件worker独立进程使用PG `FOR UPDATE SKIP LOCKED`、180秒租约与有限重试。消息使用 `waiting_attachments` 状态，归档、群修改与原工作表情清理兼容。上传API只接收并登记，IM ack只登记加密资源引用，不执行下载/解析。macOS解析使用系统sandbox-exec禁止网络与存储目录外写入，附加CPU/文件/描述符/时间限额；它不是完整文件读取隔离沙箱。Linux当前默认失败关闭，必须部署网络/文件系统隔离后再使用，`ATTACHMENT_ALLOW_PROCESS_ONLY=1`仅显式允许资源受限子进程，不可称为真沙箱。
+
+内部 `/internal/attachment-mcp` 提供 list_attachments、get_attachment_status、read_document、list_sheets、read_sheet_range、search；结果含source、页/表/范围、truncated和continuation，单次响应有界。附件MCP与图片取件分别使用独立audience、240秒run/user/conversation能力。runner只从部署配置的内部地址取件并验证checksum、大小和实际PNG，独立临时目录清理，沿用OAuth互斥锁。
+
+飞书支持已验证的WS/webhook text/image/file/post资源引用；钉钉支持text/picture/richText，以及限定 `content.downloadCode/fileName` 的file适配。钉钉下载按官方SDK `POST /v1.0/robot/messageFiles/download`、downloadCode/robotCode、downloadUrl协议。下载仅允许HTTPS、域名白名单、每跳公网DNS，TLS连接固定到已验证IP；不跨host转发凭据，限制字节和时间。真实平台自然附件事件尚需现场验收，不能据mock断言所有群聊/私聊文件schema均兼容。未知身份只记录discovery元数据，不能下载正文。机器人收到的文件不要求个人OAuth。
+
+本地启动（先启动已迁移API，再启动worker；不涉及Docker）：
+
+```bash
+.venv/bin/python scripts/run_attachment_local.py
+```
+
+worker以PG advisory lock保证本地唯一实例，周期清理过期未发送草稿及孤立目录。部署容器时API与worker需共享专属附件卷、runner不挂原件卷；新volume/服务名/网络/CPU内存/端口与旧服务影响必须先人工审核，当前未创建或启动容器。配置及备份不得暴露签名URL、downloadCode、token或用户文件。
+
 ## 安装与首次初始化
 
 准备 Python 3.12、Node.js 与 PostgreSQL。使用 Docker 前先审核 [容器影响清单](docs/DOCKER_IMPACT.md)，确认端口、资源、网络、卷与现有服务隔离。
+
+现有 `compose.yaml` 仅提供基础工作台部署，尚未接线独立附件 worker、API/worker 共享附件卷及个人平台授权内部桥接配置。下述基础启动命令不代表这些新增功能已可在容器中使用；附件解析在 Linux 默认失败关闭，启用前须完成隔离方案、配置与实际验收。本次源码同步不发布或更新 Release/GHCR 镜像。
 
 ```bash
 python3 scripts/init_env.py

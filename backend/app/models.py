@@ -143,6 +143,51 @@ class SessionToken(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class PlatformConnection(Base):
+    __tablename__ = 'platform_connections'
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(20), primary_key=True)
+    state: Mapped[str] = mapped_column(String(32), default='disconnected')
+    encrypted: Mapped[str] = mapped_column(Text, default='')
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PlatformAuthJob(Base):
+    __tablename__ = 'platform_auth_jobs'
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(20), primary_key=True)
+    generation: Mapped[str] = mapped_column(String(36), default=uid)
+    phase: Mapped[str] = mapped_column(String(32), default='begin', index=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    identity_id: Mapped[str | None] = mapped_column(String(36))
+    source_run_id: Mapped[str | None] = mapped_column(String(36))
+    im_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    app_scope: Mapped[str | None] = mapped_column(String(64))
+    delivery: Mapped[str] = mapped_column(String(32), default='web')
+    notification: Mapped[str] = mapped_column(String(32), default='pending')
+    error: Mapped[str | None] = mapped_column(String(64))
+
+
+class PlatformAuthRequest(Base):
+    __tablename__ = 'platform_auth_requests'
+    __table_args__ = (UniqueConstraint('run_id', 'provider'),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    run_id: Mapped[str] = mapped_column(ForeignKey('runs.id'), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), index=True)
+    provider: Mapped[str] = mapped_column(String(20))
+    message_id: Mapped[str] = mapped_column(ForeignKey('messages.id'), index=True)
+
+
+class PlatformSettings(Base):
+    __tablename__ = 'platform_settings'
+    provider: Mapped[str] = mapped_column(String(20), primary_key=True)
+    revision: Mapped[int] = mapped_column(default=1)
+    encrypted: Mapped[str] = mapped_column(Text)
+
+
 class IMSettings(Base):
     __tablename__ = 'im_settings'
     provider: Mapped[str] = mapped_column(String(20), primary_key=True)
