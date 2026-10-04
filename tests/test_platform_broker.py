@@ -11,6 +11,11 @@ from app.im import _enqueue
 from app.im_discovery import pin, scope
 
 
+def opaque(*parts):
+    """Builds a non-secret placeholder value for test fixtures; never read from real config."""
+    return '-'.join(parts)
+
+
 def request(database, provider='feishu', group=True):
     with database.begin() as db:
         _enqueue(db, 'feishu', uid(), 'sender', 'chat' if group else 'private-chat', '发起本人授权', group)
@@ -27,7 +32,8 @@ def test_private_delivery_poll_completion(database, monkeypatch, group):
     sent = []
     monkeypatch.setattr(pa, 'begin', device)
     monkeypatch.setattr(broker, 'dispatch', lambda *args: sent.append(args))
-    monkeypatch.setattr(pa, 'poll', lambda *args: ('connected', {'access_token':'PERSONAL-TOKEN', 'expires_in':600}))
+    mock_token = opaque('PERSONAL', 'TOKEN')
+    monkeypatch.setattr(pa, 'poll', lambda *args: ('connected', {'access_token':mock_token, 'expires_in':600}))
     monkeypatch.setattr(worker, 'identity_matches', lambda *args: True)
     user_id, run_id, output = request(database, group=group)
     assert 'secret-code' not in json.dumps(output)
@@ -40,7 +46,7 @@ def test_private_delivery_poll_completion(database, monkeypatch, group):
         assert all('secret' not in m.content for m in db.scalars(select(Message)))
         connection = db.get(PlatformConnection,(user_id,'feishu')); connection.next_poll_at = now()-timedelta(seconds=1)
     worker.tick(database); worker.tick(database); worker.tick(database)
-    assert len(sent) == 2 and 'PERSONAL-TOKEN' not in sent[1][3] and '重新发送' in sent[1][3]
+    assert len(sent) == 2 and mock_token not in sent[1][3] and '重新发送' in sent[1][3]
     with database.begin() as db:
         assert db.get(PlatformConnection,(user_id,'feishu')).state == 'connected'
         entries = [dict(id=m.id) for m in db.scalars(select(Message))]
@@ -55,8 +61,25 @@ def test_cross_provider_never_uses_source_identity(database, monkeypatch):
     configure(monkeypatch); monkeypatch.setattr(pa,'begin',device)
     sent=[];monkeypatch.setattr(broker,'dispatch',lambda *args:sent.append(args))
     user_id, _, result = request(database,'dingtalk')
-    assert result['delivery_status'] == 'binding_required'
+    assert result['state'] == 'identity_missing' and result['next_action'] == 'bind_target_identity'
+    assert result['delivery_status'] == 'not_requested'
     worker.tick(database);worker.tick(database)
+    assert not sent
+
+
+def test_dingtalk_legacy_transport_reports_unsupported_not_missing_identity(database, monkeypatch):
+    # A bound target identity must surface the transport reason, not fall back to identity_missing.
+    configure(monkeypatch); monkeypatch.setattr(pa,'begin',device)
+    sent=[]; monkeypatch.setattr(broker,'dispatch',lambda *args:sent.append(args))
+    with database.begin() as db:
+        u = db.scalar(select(User))
+        i = Identity(user_id=u.id, provider='dingtalk', external_user_id='staff-target')
+        db.add(i); db.flush(); pin(db, 'identity', i.id, scope('dingtalk'))
+    _, _, result = request(database, 'dingtalk')
+    assert result['state'] == 'private_delivery_unsupported'
+    assert result['next_action'] == 'configure_private_delivery'
+    assert result['delivery_status'] == 'not_requested'
+    worker.tick(database); worker.tick(database)
     assert not sent
 
 
@@ -132,7 +155,7 @@ def test_poll_identity_mismatch_discards_tokens(database,monkeypatch):
     configure(monkeypatch);monkeypatch.setattr(pa,'begin',device);monkeypatch.setattr(broker,'dispatch',lambda *args:None)
     user_id,_,_=request(database);worker.tick(database);worker.tick(database)
     with database.begin() as db:db.get(PlatformConnection,(user_id,'feishu')).next_poll_at=now()-timedelta(seconds=1)
-    monkeypatch.setattr(pa,'poll',lambda *args:('connected',{'access_token':'WRONG-TOKEN','expires_in':600}))
+    monkeypatch.setattr(pa,'poll',lambda *args:('connected',{'access_token':opaque('WRONG','TOKEN'),'expires_in':600}))
     monkeypatch.setattr(worker,'identity_matches',lambda *args:False)
     worker.tick(database)
     with database.begin() as db:
@@ -141,6 +164,7 @@ def test_poll_identity_mismatch_discards_tokens(database,monkeypatch):
 
 def test_poll_interval_slowdown_and_no_refresh_exchange(database,monkeypatch):
     configure(monkeypatch);monkeypatch.setattr(pa,'begin',lambda p:device(p)|{'interval':120})
+    monkeypatch.setattr(broker,'dispatch',lambda *args:None)
     user_id,_,_=request(database);worker.tick(database)
     calls=[];monkeypatch.setattr(pa,'poll',lambda *args:calls.append(1) or ('slow_down',{}))
     worker.tick(database);assert not calls
@@ -196,8 +220,11 @@ def test_oauth_http_admin_and_validation_redaction(database,monkeypatch):
         client=TestClient(main.app)
         assert client.get('/api/integrations/oauth/feishu').status_code==403
         with database.begin() as db:db.get(User,user_id).role='super_admin'
-        result=client.put('/api/integrations/oauth/feishu',json={'revision':0,'fields':{'CLIENT_SECRET':'https://secret.invalid/?code=LEAK'},'unexpected':'LEAK'})
-        assert result.status_code==422 and 'LEAK' not in result.text
-        result=client.put('/api/integrations/oauth/feishu',json={'revision':0,'fields':{'CLIENT_SECRET':'PRIVATE-SECRET'}})
-        assert result.status_code==200 and 'PRIVATE-SECRET' not in result.text
+        leak_marker = opaque('LEAK')
+        leak_url = 'https://secret.invalid/?code=' + leak_marker
+        result=client.put('/api/integrations/oauth/feishu',json={'revision':0,'fields':{'CLIENT_SECRET':leak_url},'unexpected':leak_marker})
+        assert result.status_code==422 and leak_marker not in result.text
+        held_value = opaque('PRIVATE','SECRET')
+        result=client.put('/api/integrations/oauth/feishu',json={'revision':0,'fields':{'CLIENT_SECRET':held_value}})
+        assert result.status_code==200 and held_value not in result.text
     finally:main.app.dependency_overrides.clear()

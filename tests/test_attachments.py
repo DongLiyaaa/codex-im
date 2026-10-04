@@ -136,6 +136,9 @@ def test_fake_ip_resolution_pins_only_public_official_host(monkeypatch, answer):
     calls.clear()
     with pytest.raises(RuntimeError): attachment_download.resolve_addresses('other.feishu.cn')
     assert calls == []
+    if answer == '8.8.8.8':
+        assert attachment_download.resolve_addresses('accounts.feishu.cn') == [answer]
+        assert ('GET', '/dns-query?name=accounts.feishu.cn&type=A') in calls
 
 
 @pytest.mark.parametrize('status,retryable', [(403, False), (404, False), (429, True), (503, True)])

@@ -39,6 +39,12 @@ class Department(Base):
     name: Mapped[str] = mapped_column(String(200))
 
 
+# IM-only members are created at approval time without a password. "!" is not a salt:digest pair, so no input can
+# ever verify against it; the reserved .invalid domain keeps their placeholder email from ever being deliverable.
+LOCKED_PASSWORD = '!'
+IM_ONLY_EMAIL_DOMAIN = 'im.invalid'
+
+
 class User(Base):
     __tablename__ = 'users'
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
@@ -49,6 +55,10 @@ class User(Base):
     org_id: Mapped[str | None] = mapped_column(String(100), index=True)
     team_id: Mapped[str | None] = mapped_column(String(100), index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    @property
+    def login_enabled(self) -> bool:
+        return self.password_hash != LOCKED_PASSWORD
 
 
 class Group(Base):
@@ -217,6 +227,63 @@ class IMDiscovery(Base):
     reason: Mapped[str] = mapped_column(String(40))
     first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+
+class IMOutbox(Base):
+    """Durable replies to IM commands; sent by the API outbox thread and never replayed once ambiguous."""
+    __tablename__ = 'im_outbox'
+    event_id: Mapped[str] = mapped_column(ForeignKey('im_events.id'), primary_key=True)
+    text: Mapped[str] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(String(20), default='pending', index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PlatformApproval(Base):
+    """A risky platform action that only the requester's own chat message can release.
+
+    The whole request is kept server-side, so executing it never depends on the model repeating it
+    exactly, and the model cannot alter it after the user approved. Terminal states clear the payload.
+    """
+    __tablename__ = 'platform_approvals'
+    __table_args__ = (UniqueConstraint('user_id', 'code'), Index('ix_platform_approvals_user_state', 'user_id', 'state'))
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    code: Mapped[str] = mapped_column(String(12))
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id'))
+    conversation_id: Mapped[str] = mapped_column(ForeignKey('conversations.id'), index=True)
+    provider: Mapped[str] = mapped_column(String(20))
+    operation: Mapped[str] = mapped_column(String(20))
+    digest: Mapped[str] = mapped_column(String(64))
+    summary: Mapped[str] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    state: Mapped[str] = mapped_column(String(16), default='pending')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class IMOnboardingPolicy(Base):
+    """Opt-in rule: verified same-organization private senders become members without an administrator click.
+
+    Always off until an administrator saves it; the role is fixed to member and never stored here.
+    """
+    __tablename__ = 'im_onboarding_policies'
+    provider: Mapped[str] = mapped_column(String(20), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    org_id: Mapped[str | None] = mapped_column(String(100))
+    team_id: Mapped[str | None] = mapped_column(String(100))
+    daily_cap: Mapped[int] = mapped_column(default=20)
+    updated_by: Mapped[str | None] = mapped_column(String(36))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class IMChatName(Base):
+    """Display-only names of external group chats; never an authorization source."""
+    __tablename__ = 'im_chat_names'
+    provider: Mapped[str] = mapped_column(String(20), primary_key=True)
+    app_scope: Mapped[str] = mapped_column(String(64), primary_key=True)
+    chat_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
 
 
 class IMScopeBinding(Base):

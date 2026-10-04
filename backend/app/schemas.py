@@ -51,6 +51,17 @@ class UserCreate(Login):
         return self
 
 
+class UserUpdate(Input):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    active: bool | None = None
+
+    @model_validator(mode='after')
+    def something(self):
+        if self.name is None and self.active is None:
+            raise ValueError('Nothing to update')
+        return self
+
+
 class GroupCreate(Input):
     name: str = Field(min_length=1, max_length=200)
     org_id: str = Field(min_length=1, max_length=100)
@@ -131,6 +142,8 @@ class UserOut(Output):
     org_id: str | None
     team_id: str | None
     active: bool
+    login_enabled: bool = True
+    can_manage: bool = False
 
 
 class GroupOut(Output):

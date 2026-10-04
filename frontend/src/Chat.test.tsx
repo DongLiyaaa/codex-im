@@ -28,6 +28,16 @@ describe('message working feedback', () => {
     view.rerender(<MessageWorkStatus message={message} messages={[message]} run={{ ...run, message_id: 'other' }}/>);
     expect(screen.queryByRole('status')).toBeNull();
   });
+  it('readonly supervisors cannot load or manage another user authorization card', async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const card = {...message, role:'system', platform_authorization:{provider:'feishu',state:'pending',can_open:false}};
+    request.mockImplementation(async (path:string)=>path.endsWith('/state') ? {messages:[card],active_run:null,latest_run:null} : path.endsWith('/capabilities') ? {skills:[],mcps:[]} : []);
+    render(<Chat user={{id:'admin',role:'super_admin',org_id:null,team_id:null,email:'',name:'',active:true}}/>);
+    await act(async()=>{});
+    expect(screen.getByText('仅授权请求者本人可打开材料。')).toBeTruthy();
+    expect(screen.queryByText('查看本人授权状态')).toBeNull();
+    expect(request.mock.calls.some(([path])=>path.startsWith('/platform-connections'))).toBe(false);
+  });
   it('restores an IM run for readonly supervision and observes completion', async () => {
     vi.useFakeTimers(); Element.prototype.scrollIntoView = vi.fn();
     let state = { messages: [message], active_run: { ...run, provider: 'feishu' }, latest_run: run };
