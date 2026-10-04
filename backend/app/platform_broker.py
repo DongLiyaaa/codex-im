@@ -44,12 +44,17 @@ def status(db, actor, provider, private=False):
                 job.phase, job.notification, job.error = 'done', 'cancelled', 'IDENTITY_OR_SCOPE_REVOKED'
         if row.state == 'expired' and job:
             job.phase, job.notification = 'done', 'cancelled'
+        problem = settings.readiness(db, provider)
+        if problem:
+            row.state, row.encrypted = problem, ''
+            if job:
+                job.phase, job.notification, job.delivery, job.error = 'done', 'cancelled', 'not_requested', problem.upper()
         result = pa.view(row, private)
         if private and row.state == 'pending' and result.get('authorization_url') and not pa.valid_link(provider, result['authorization_url']):
             result.pop('authorization_url', None)
             result.pop('user_code', None)
         result['delivery_status'] = job.delivery if job else 'not_requested'
-        result['error_code'] = job.error if job else None
+        result['error_code'] = job.error if job else problem.upper() if problem else row.state.upper() if row.state in pa.MESSAGES and row.state not in ('disconnected', 'pending', 'starting', 'connected') else None
         return result
 
 
@@ -94,24 +99,37 @@ def start(db, actor, provider, run=None, private=False):
             result = status(db, actor, provider, private)
             if result['state'] in ('pending', 'connected', 'starting'):
                 return result
-        if not all(pa.credentials(provider)):
-            row.state = 'setup_required'
+        problem = settings.readiness(db, provider)
+        if problem:
+            row.state, row.encrypted = problem, ''
             return status(db, actor, provider, private)
         from .security import rate_limit
         rate_limit('platform-start:' + actor.id + ':' + provider)
         identity, scope, im_fp = None, None, None
         delivery = 'web'
-        if run and db.scalar(select(IMEvent.id).where(IMEvent.run_id == run.id)):
-            try:
-                identity, scope, im_fp = target(db, actor, provider)
-            except Exception:
-                pass
-            delivery = 'queued' if identity else 'binding_required'
-        else:
-            try:
-                identity, scope, im_fp = target(db, actor, provider, require_delivery=False)
-            except Exception:
-                pass
+        im_source = run and db.scalar(select(IMEvent.id).where(IMEvent.run_id == run.id))
+        try:
+            identity, scope, im_fp = target(db, actor, provider, require_delivery=False)
+        except Exception:
+            pass
+        problem = None
+        if not identity:
+            problem = 'identity_missing'
+        with im_settings.snapshot(db, provider) as im_values:
+            bot_id = im_values.get('FEISHU_APP_ID' if provider == 'feishu' else 'DINGTALK_CLIENT_ID')
+            if identity and bot_id != pa.credentials(provider)[0]:
+                problem = 'identity_app_mismatch'
+            elif identity and im_source and provider == 'dingtalk' and im_values.get('DINGTALK_TRANSPORT') != 'stream':
+                # Only a resolved target's transport support can override; a missing
+                # identity must keep reporting identity_missing, not this unrelated check.
+                problem = 'private_delivery_unsupported'
+        delivery = 'queued' if im_source and not problem else 'web'
+        if problem:
+            row.state, row.encrypted = problem, ''
+            old_job = db.get(PlatformAuthJob, (actor.id, provider))
+            if old_job:
+                old_job.phase, old_job.notification, old_job.delivery, old_job.error = 'done', 'cancelled', 'not_requested', problem.upper()
+            return status(db, actor, provider, private)
         job = db.get(PlatformAuthJob, (actor.id, provider))
         if not job:
             job = PlatformAuthJob(user_id=actor.id, provider=provider, fingerprint=fingerprint(provider))

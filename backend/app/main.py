@@ -19,7 +19,7 @@ from . import policy, schemas, service, im_settings
 @asynccontextmanager
 async def lifespan(app):
     session_secret()
-    Base.metadata.create_all(engine, tables=[table for table in Base.metadata.sorted_tables if table.name not in ('im_reactions', 'organizations', 'departments', 'platform_settings', 'platform_auth_jobs', 'platform_auth_requests')])
+    Base.metadata.create_all(engine, tables=[table for table in Base.metadata.sorted_tables if table.name not in ('im_reactions', 'organizations', 'departments', 'platform_settings', 'platform_auth_jobs', 'platform_auth_requests', 'im_chat_names', 'im_outbox', 'platform_approvals', 'im_onboarding_policies')])
     from .im_migrations import migrate
     migrate(engine)
     with SessionLocal.begin() as db:
@@ -39,7 +39,11 @@ async def lifespan(app):
     from .platform_worker import AuthWorker
     auth_worker = AuthWorker()
     auth_worker.start()
+    from .im_commands import OutboxWorker
+    outbox_worker = OutboxWorker()
+    outbox_worker.start()
     yield
+    outbox_worker.stop()
     auth_worker.stop()
     worker.stop()
 
@@ -153,9 +157,15 @@ def me(actor=Depends(current_user)):
     return actor
 
 
+def user_out(actor, user):
+    result = schemas.UserOut.model_validate(user)
+    result.can_manage = policy.can_manage_user(actor, user)
+    return result
+
+
 @app.get('/api/users', response_model=list[schemas.UserOut])
 def users(actor=Depends(current_user), db=Depends(get_db)):
-    return [u for u in db.scalars(select(User)) if u.id == actor.id or policy.can_manage_user(actor, u)]
+    return [user_out(actor, u) for u in db.scalars(select(User)) if u.id == actor.id or policy.can_manage_user(actor, u)]
 
 
 @app.post('/api/users', response_model=schemas.UserOut, status_code=201)
@@ -167,7 +177,15 @@ def create_user(body: schemas.UserCreate, actor=Depends(current_user), db=Depend
     db.add(target)
     db.flush()
     service.audit(db, actor, 'user.create', target.id)
-    return target
+    return user_out(actor, target)
+
+
+@app.patch('/api/users/{identifier}', response_model=schemas.UserOut)
+def update_user(identifier: str, body: schemas.UserUpdate, actor=Depends(current_user), db=Depends(get_db)):
+    from . import user_lifecycle
+    target = user_lifecycle.manageable(db, actor, identifier)
+    user_lifecycle.apply(db, actor, target, body)
+    return user_out(actor, target)
 
 
 def group_out(db, actor, group):
@@ -369,6 +387,16 @@ def conversation_state(identifier: str, actor=Depends(current_user), db=Depends(
 @app.post('/api/conversations/{identifier}/messages', status_code=202)
 def send_message(identifier: str, body: schemas.MessageCreate, actor=Depends(current_user), db=Depends(get_db)):
     conversation = get_or_404(db, Conversation, identifier)
+    from . import approvals
+    decision = None if body.attachment_ids else approvals.parse(body.content)
+    if decision:
+        # "/approve CODE" released by the signed-in user themselves; same rules as in IM.
+        busy = bool(db.scalar(select(Run.id).where(Run.conversation_id == conversation.id,
+                                                   Run.status.in_(['queued', 'running', 'waiting_attachments'])).limit(1)))
+        handled = approvals.handle(db, actor, conversation, decision, busy)
+        if handled.continuation is None:
+            return approvals.record_exchange(db, actor, conversation, body.content, handled.reply)
+        return service.enqueue_message(db, actor, conversation, handled.continuation)
     return service.enqueue_message(db, actor, conversation, body.content, body.attachment_ids)
 
 
@@ -481,7 +509,9 @@ except ModuleNotFoundError as exc:
 else:
     app.include_router(im.router)
     from .im_discovery import router as discovery_router
+    from .im_onboarding import router as onboarding_router
     app.include_router(discovery_router)
+    app.include_router(onboarding_router)
 
 from .directory import router as directory_router
 app.include_router(directory_router)

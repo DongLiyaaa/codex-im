@@ -25,12 +25,27 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); request.mockReset(); window.history.replaceState(null,'','#/overview'); });
 function RoutedChat() { const {route,navigate}=useRoute(); return <Chat user={user} conversationId={route.conversationId} onSelect={(id,replace)=>navigate({page:'chat',conversationId:id},replace)}/>; }
+it('redirects legacy connections bookmarks to chat without loading private materials', async () => {
+  expect(readRoute('#/connections')).toEqual({page:'chat',conversationId:null});
+  window.history.replaceState(null,'','#/connections'); render(<App/>);
+  await waitFor(()=>expect(window.location.hash).toBe('#/chat'));
+  expect(screen.queryByRole('button',{name:'个人平台连接'})).toBeNull();
+  expect(screen.getByRole('button',{name:'本人平台授权'})).toBeTruthy();
+  expect(request.mock.calls.some(([p])=>p.startsWith('/platform-connections'))).toBe(false);
+});
 it('restores the page and selected conversation after reload', async () => {
   window.history.replaceState(null,'','#/chat/b'); const view=render(<App/>);
   await waitFor(()=>expect(screen.getByRole('heading',{name:'Beta'})).toBeTruthy());
   view.unmount(); render(<App/>);
   await waitFor(()=>expect(screen.getByRole('heading',{name:'Beta'})).toBeTruthy());
   expect(window.location.hash).toBe('#/chat/b');
+});
+it('offers personal management without a selected conversation or historical card', async () => {
+  window.history.replaceState(null,'','#/chat'); render(<App/>);
+  fireEvent.click(await screen.findByRole('button',{name:'本人平台授权'}));
+  expect(screen.getAllByRole('button',{name:'查看本人授权状态'})).toHaveLength(2);
+  expect(screen.getByText(/仅管理当前登录账号/)).toBeTruthy();
+  expect(request.mock.calls.some(([p])=>p==='/platform-connections')).toBe(false);
 });
 it('preserves management page and rejects member audit route', async () => {
   window.history.replaceState(null,'','#/resources'); const view=render(<App/>);

@@ -6,8 +6,8 @@ from .models import IMReaction, Organization, Department
 def migrate(engine):
     with engine.begin() as conn:
         conn.execute(select(func.pg_advisory_xact_lock(71904)))
-        from .models import PlatformSettings, PlatformAuthJob, PlatformAuthRequest
-        for model in (PlatformSettings, PlatformAuthJob, PlatformAuthRequest):
+        from .models import PlatformSettings, PlatformAuthJob, PlatformAuthRequest, IMChatName, IMOutbox, PlatformApproval, IMOnboardingPolicy
+        for model in (PlatformSettings, PlatformAuthJob, PlatformAuthRequest, IMChatName, IMOutbox, PlatformApproval, IMOnboardingPolicy):
             model.__table__.create(conn, checkfirst=True)
         IMReaction.__table__.create(conn, checkfirst=True)
         Organization.__table__.create(conn, checkfirst=True)

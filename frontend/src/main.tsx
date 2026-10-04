@@ -10,7 +10,7 @@ import type { Page } from './Management';
 import { Chat } from './Chat';
 import './style.css';
 import { useRoute, canAccessPage } from './route';
-const navigation = [{ page: 'overview', icon: LayoutDashboard }, { page: 'chat', icon: MessagesSquare }, { page: 'connections', icon: Cable }, { page: 'directory', icon: Layers }, { page: 'users', icon: Users }, { page: 'groups', icon: UsersRound }, { page: 'resources', icon: Layers }, { page: 'bindings', icon: KeyRound }, { page: 'integrations', icon: Cable }, { page: 'audit', icon: ScrollText }] as const;
+const navigation = [{ page: 'overview', icon: LayoutDashboard }, { page: 'chat', icon: MessagesSquare }, { page: 'directory', icon: Layers }, { page: 'users', icon: Users }, { page: 'groups', icon: UsersRound }, { page: 'resources', icon: Layers }, { page: 'bindings', icon: KeyRound }, { page: 'integrations', icon: Cable }, { page: 'audit', icon: ScrollText }] as const;
 export function App() {
   const { route, navigate: changeRoute } = useRoute();
   const page = route.page;

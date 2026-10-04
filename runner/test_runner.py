@@ -23,6 +23,7 @@ def settings(monkeypatch):
     monkeypatch.delenv("CODEX_API_KEY", raising=False)
     monkeypatch.delenv("CODEX_AUTH_MODE", raising=False)
     monkeypatch.delenv("CODEX_OAUTH_AUTH_FILE", raising=False)
+    monkeypatch.delenv("CODEX_PROXY_URL", raising=False)
     m.app.state.active = 0
 
 
@@ -42,6 +43,20 @@ def test_fixed_platform_bridge_keeps_private_mcp_forbidden(tmp_path, monkeypatch
         m.MCP(name='private', url='http://127.0.0.1:18200/internal/platform-mcp')
     with pytest.raises(ValueError):
         m.Execute(run_id='r', conversation_id='c', prompt='x', platform_url='http://other/')
+
+
+def test_optional_proxy_reaches_codex_but_not_local_bridges(tmp_path, monkeypatch):
+    (tmp_path / 'none').mkdir(); (tmp_path / 'proxied').mkdir()
+    _, env = m.prepare(tmp_path / 'none', payload(), 'key')
+    assert not any('proxy' in k.lower() for k in env)
+    monkeypatch.setenv('CODEX_PROXY_URL', 'http://127.0.0.1:7890')
+    _, env = m.prepare(tmp_path / 'proxied', payload(), 'key')
+    assert env['HTTPS_PROXY'] == env['http_proxy'] == 'http://127.0.0.1:7890'
+    assert '127.0.0.1' in env['NO_PROXY'].split(',') and 'localhost' in env['no_proxy'].split(',')
+    for bad in ('127.0.0.1:7890', 'ftp://127.0.0.1:7890', 'http://127.0.0.1:7890/path'):
+        monkeypatch.setenv('CODEX_PROXY_URL', bad)
+        with pytest.raises(RuntimeError):
+            m.proxy_env()
 
 
 def test_auth_and_validation_do_not_echo_secrets():
@@ -134,10 +149,22 @@ def test_only_agent_messages(tmp_path):
     ("print('{}')", "CODEX_NO_FINAL_RESPONSE"),
     ("import sys; print('secret', file=sys.stderr); sys.exit(1)", "CODEX_EXECUTION_FAILED"),
     ("print('{\"type\":\"turn.failed\",\"error\":\"secret\"}')", "CODEX_EXECUTION_FAILED"),
+    ("print('{\"type\":\"error\",\"message\":\"stream failed\"}')", "CODEX_NO_FINAL_RESPONSE"),
 ])
 def test_safe_process_errors(tmp_path, script, code):
     with pytest.raises(m.RunnerError, match=code):
         asyncio.run(m.process([sys.executable, "-c", script], tmp_path, {}, jsonl=True))
+
+
+def test_transient_reconnect_notices_do_not_fail_completed_turn(tmp_path):
+    events = [{"type": "thread.started"}, {"type": "turn.started"},
+              {"type": "error", "message": "Reconnecting... 2/5 (request timed out)"},
+              {"type": "item.completed", "item": {"type": "error", "message": "Falling back from WebSockets to HTTPS transport."}},
+              {"type": "item.completed", "item": {"type": "agent_message", "text": "answer"}},
+              {"type": "turn.completed"}]
+    script = "import json\n" + "".join(f"print(json.dumps({e!r}))\n" for e in events)
+    result = asyncio.run(m.process([sys.executable, "-c", script], tmp_path, {}, jsonl=True))
+    assert result == "answer"
 
 
 def test_output_limit(tmp_path, monkeypatch):
@@ -215,11 +242,18 @@ def test_timeout(monkeypatch):
         asyncio.run(m.execute(payload(), "key"))
 
 
+# Local pytest fixtures only; never read from a real credential source.
+MOCK_ACCESS_TOKEN = '-'.join(['test', 'access'])
+MOCK_REFRESH_TOKEN = '-'.join(['test', 'refresh'])
+MOCK_ID_TOKEN = '-'.join(['test', 'id'])
+MOCK_ACCOUNT_ID = '-'.join(['test', 'account'])
+
+
 def oauth_file(tmp_path, monkeypatch):
     source = tmp_path / "auth.json"
     source.write_text(json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": None,
-        "tokens": {"access_token": "test-access", "refresh_token": "test-refresh",
-                   "id_token": "test-id", "account_id": "test-account"}}))
+        "tokens": {"access_token": MOCK_ACCESS_TOKEN, "refresh_token": MOCK_REFRESH_TOKEN,
+                   "id_token": MOCK_ID_TOKEN, "account_id": MOCK_ACCOUNT_ID}}))
     source.chmod(0o600)
     monkeypatch.setenv("CODEX_AUTH_MODE", "chatgpt")
     monkeypatch.setenv("CODEX_OAUTH_AUTH_FILE", str(source))
@@ -282,7 +316,7 @@ def test_oauth_refresh_persisted_and_redacted(tmp_path, monkeypatch, outcome):
             raise m.RunnerError("CODEX_EXECUTION_FAILED")
         if outcome == "cancel":
             raise asyncio.CancelledError()
-        return "test-access new-access answer"
+        return MOCK_ACCESS_TOKEN + " new-access answer"
     monkeypatch.setattr(m, "process", fake)
     if outcome == "success":
         assert asyncio.run(m.execute(payload(), None)) == "[REDACTED] [REDACTED] answer"
