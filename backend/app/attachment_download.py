@@ -21,6 +21,11 @@ class HTTPDownloadError(DownloadError):
         super().__init__('ATTACHMENT_HTTP_' + str(status) + ('_CODE_' + str(code) if code is not None else ''))
 
 
+# Fixed official API hosts (never taken from user input) that may be re-resolved via DoH under Fake-IP DNS.
+DOH_HOSTS = frozenset({'open.feishu.cn', 'accounts.feishu.cn', 'api.dingtalk.com', 'login.dingtalk.com',
+                       'oapi.dingtalk.com', 'mcp.dingtalk.com'})
+
+
 def public_addresses(addresses):
     return bool(addresses) and all(ipaddress.ip_address(a).is_global and not
         getattr(ipaddress.ip_address(a), 'ipv4_mapped', None) for a in addresses)
@@ -28,13 +33,13 @@ def public_addresses(addresses):
 
 def resolve_addresses(host):
     addresses = list(dict.fromkeys(entry[4][0] for entry in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)))
-    # Fake-IP DNS cannot be connected to safely. Resolve ONLY the fixed Feishu API
+    # Fake-IP DNS cannot be connected to safely. Resolve ONLY the fixed official APIs
     # through a fixed, TLS-authenticated public resolver; never connect to Fake-IP.
     benchmark = ipaddress.ip_network('198.18.0.0/15')
-    if host == 'open.feishu.cn' and addresses and all(ipaddress.ip_address(a) in benchmark for a in addresses):
+    if host in DOH_HOSTS and addresses and all(ipaddress.ip_address(a) in benchmark for a in addresses):
         connection = PinnedHTTPS('cloudflare-dns.com', '1.1.1.1')
         try:
-            connection.request('GET', '/dns-query?name=open.feishu.cn&type=A', headers={'Accept': 'application/dns-json'})
+            connection.request('GET', f'/dns-query?name={host}&type=A', headers={'Accept': 'application/dns-json'})
             response = connection.getresponse()
             raw = response.read(65537)
             if response.status != 200 or len(raw) > 65536:

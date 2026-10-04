@@ -6,6 +6,9 @@ from .db import SessionLocal
 from .models import PlatformAuthJob, PlatformConnection, User, now
 from . import platform_auth as pa, platform_broker as broker, platform_settings as settings
 
+# Consecutive transient poll failures tolerated before an authorization is given up (about a minute at 5s).
+MAX_POLL_FAILURES = 12
+
 
 def identity_matches(provider, tokens, recipient, values):
     token = tokens.get('access_token')
@@ -69,6 +72,10 @@ def perform(factory, user_id, provider):
                 if row.state in ('pending', 'connected'):
                     row.state, row.encrypted = 'expired', ''
                 return
+            if settings.readiness(db, provider):
+                row.state, row.encrypted, job.phase, job.notification = settings.readiness(db, provider), '', 'done', 'cancelled'
+                job.error = row.state.upper()
+                return
             user = db.get(User, user_id)
             if not user or not user.active:
                 row.state, row.encrypted, job.phase = 'expired', '', 'done'
@@ -87,7 +94,7 @@ def perform(factory, user_id, provider):
             device = pa.unseal(row)
             if operation == 'deliver':
                 if not recipient or not pa.valid_link(provider, device.get('url')):
-                    job.delivery, job.phase, job.error = 'failed', 'poll', 'PRIVATE_DELIVERY_UNAVAILABLE'
+                    row.state, row.encrypted, job.delivery, job.phase, job.error = 'private_delivery_failed', '', 'failed', 'done', 'PRIVATE_DELIVERY_UNAVAILABLE'
                     return
                 job.delivery = 'sending'
             if operation == 'notify':
@@ -101,7 +108,7 @@ def perform(factory, user_id, provider):
             from .platform_settings import _active
     # Both the durable lease and config snapshot have committed before remote I/O.
     active = _active.set(config)
-    outcome, tokens, error = None, {}, None
+    outcome, tokens, error, spent = None, {}, None, False
     try:
         if operation == 'begin':
             tokens = pa.begin(provider)
@@ -113,6 +120,7 @@ def perform(factory, user_id, provider):
         elif operation == 'poll':
             outcome, tokens = pa.poll(provider, device)
             if outcome == 'connected':
+                spent = True  # The one-time device code is consumed; polling again can never succeed.
                 if not recipient:
                     # Web requests also require a current, scoped personal IM identity.
                     with factory.begin() as db:
@@ -136,8 +144,12 @@ def perform(factory, user_id, provider):
         elif operation == 'notify':
             broker.dispatch(provider, recipient, im_values, '本人平台授权已完成。请重新发送任务；此前任务不会自动执行。', generation + '-complete')
             outcome = 'notified'
+    except pa.ProviderError as exc:
+        outcome, error = exc.state, exc.reason or exc.state.upper()
     except Exception:
-        outcome, error = 'failed', 'PRIVATE_DELIVERY_FAILED' if operation != 'poll' else 'PLATFORM_POLL_FAILED'
+        outcome = 'failed'
+        error = ('PRIVATE_DELIVERY_FAILED' if operation == 'deliver' else 'PRIVATE_NOTIFICATION_FAILED' if operation == 'notify'
+                 else 'PLATFORM_DEVICE_REJECTED' if operation == 'begin' else 'PLATFORM_POLL_FAILED')
     finally:
         _active.reset(active)
     with factory.begin() as db:
@@ -149,6 +161,10 @@ def perform(factory, user_id, provider):
             job.lease_until = None
             if job.fingerprint != broker.fingerprint(provider) or row.state not in ('pending', 'connected', 'starting'):
                 job.phase, job.notification = 'done', 'cancelled'
+                return
+            if settings.readiness(db, provider):
+                row.state, row.encrypted, job.phase, job.notification = settings.readiness(db, provider), '', 'done', 'cancelled'
+                job.error = row.state.upper()
                 return
             if job.identity_id or job.source_run_id:
                 try:
@@ -163,9 +179,13 @@ def perform(factory, user_id, provider):
                     row.next_poll_at = now() + timedelta(seconds=tokens['interval'])
                     job.phase = 'deliver' if job.delivery == 'queued' else 'poll'
                 else:
-                    row.state, row.encrypted, job.phase, job.error = 'platform_rejected', '', 'done', 'PLATFORM_DEVICE_REJECTED'
+                    row.state, row.encrypted, job.phase, job.error = outcome if outcome != 'failed' else 'platform_rejected', '', 'done', error
+                    job.delivery, job.notification = 'not_requested', 'cancelled'
             elif operation == 'deliver':
-                job.delivery, job.phase, job.error = outcome, 'poll', error
+                job.delivery, job.error = 'delivered' if outcome == 'delivered' else 'failed', error
+                job.phase = 'poll' if outcome == 'delivered' else 'done'
+                if outcome != 'delivered':
+                    row.state, row.encrypted, job.notification = 'private_delivery_failed', '', 'cancelled'
             elif operation == 'validate':
                 job.phase = 'done'
                 if outcome != 'valid':
@@ -173,9 +193,16 @@ def perform(factory, user_id, provider):
             elif operation == 'notify':
                 job.notification, job.phase, job.error = outcome, 'done', error
             elif outcome in ('authorization_pending', 'slow_down'):
-                if outcome == 'slow_down':
-                    device['interval'] += 5
+                if outcome == 'slow_down' or device.get('failures'):
+                    device['interval'] += 5 if outcome == 'slow_down' else 0
+                    device['failures'] = 0
                     row.encrypted = pa.seal(device)
+                row.next_poll_at = now() + timedelta(seconds=device['interval'])
+            elif outcome == 'failed' and provider == 'feishu' and not spent and device.get('failures', 0) < MAX_POLL_FAILURES:
+                # A network hiccup or 5xx must not end an authorization the user may be completing right now.
+                # Feishu polls are safe to repeat until a token is issued; DingTalk's one-time auth code must never be re-claimed.
+                device['failures'] = device.get('failures', 0) + 1
+                row.encrypted = pa.seal(device)
                 row.next_poll_at = now() + timedelta(seconds=device['interval'])
             elif outcome == 'connected':
                 row.state, row.encrypted = 'connected', pa.seal(tokens)

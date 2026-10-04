@@ -236,7 +236,11 @@ def execute_run(run_id):
         if not isinstance(result.get('text'), str) or not result['text'].strip():
             raise RuntimeError('Runner returned no text')
         with SessionLocal.begin() as db:
-            run = db.get(Run, run_id)
+            run = db.get(Run, run_id, with_for_update=True)
+            if run.status != 'running':
+                # Cancelled (e.g. via /stop) while executing: discard the answer, never deliver it.
+                audit(db, db.get(User, run.user_id), 'run.result_discarded', run.id, {'status': run.status})
+                return
             # Recheck state and grants before persisting an answer generated with those resources.
             current = build_payload(db, run)
             if current['skills'] != payload['skills'] or current['mcps'] != payload['mcps']:
@@ -253,14 +257,33 @@ def execute_run(run_id):
         elif isinstance(exc, RuntimeError):
             error = str(exc)
         log.warning('Run %s failed (%s)', run_id, type(exc).__name__)
+        failed = False
         with SessionLocal.begin() as db:
             run = db.get(Run, run_id)
             if run and run.status == 'running':
                 run.status, run.error = 'failed', error
                 audit(db, db.get(User, run.user_id), 'run.failed', run.id, {'error': error})
+                failed = True
+        if failed:
+            # IM senders otherwise see silence; the notice carries no upstream detail.
+            deliver(run_id, failure_notice(error))
     finally:
         from .im_reactions import process
         process(run_id)
+
+
+FAILURE_REASONS = {
+    'Runner execution failed; check runner configuration and logs': '执行服务暂时不可用',
+    'Execution permission or resource validation failed': '权限或能力校验未通过',
+    'Resource grants changed during execution': '执行期间授权发生了变化',
+    'Runner returned no text': '模型没有返回内容',
+    'Runner response exceeded limit': '回复内容超过上限',
+}
+
+
+def failure_notice(error):
+    reason = FAILURE_REASONS.get(error) or (error if error and not error.isascii() and len(error) <= 60 else '处理异常')
+    return f'本次处理失败：{reason}。请稍后重新发送；如持续失败请联系管理员。'
 
 
 def deliver(run_id, reply):

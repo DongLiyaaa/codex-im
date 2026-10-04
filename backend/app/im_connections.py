@@ -27,18 +27,20 @@ def receive_feishu(payload, factory=SessionLocal):
         message, sender = event['message'], event['sender']
         if sender.get('sender_type') != 'user':
             return {'ok': True, 'ignored': True}
-        from .attachment_ingress import feishu
-        content, refs = feishu(message)
-        if content is None:
-            return {'ok': True, 'ignored': True}
         if message.get('chat_type') not in ('p2p', 'group'):
             im._reject(400)
+        from . import im_inbound
+        # Network lookups (bot identity, quoted message) happen before the database transaction opens.
+        inbound = im_inbound.feishu(message)
+        if inbound is None:
+            return {'ok': True, 'ignored': True}
         with factory.begin() as db:
             ensure_current(db, 'feishu')
             return im._enqueue(db, 'feishu', message['message_id'], sender['sender_id']['open_id'],
-                               message['chat_id'], content,
-                               message['chat_type'] == 'group', reply_mode='websocket',
-                               **({'attachment_refs': refs} if refs else {}))
+                               message['chat_id'], inbound.content,
+                               message['chat_type'] == 'group', reply_mode='websocket', notice=inbound.notice,
+                               sender_internal=im_inbound.feishu_internal(payload['header'], sender),
+                               **({'attachment_refs': inbound.refs} if inbound.refs else {}))
     except (KeyError, TypeError, AttributeError, ValueError):
         im._reject(400)
 
@@ -48,11 +50,11 @@ def receive_dingtalk(payload, factory=SessionLocal):
     try:
         # Do not parse/store sessionWebhook or arbitrary extension fields.
         data = {key: payload[key] for key in ('msgtype', 'msgId', 'senderStaffId', 'conversationId',
-                'conversationType', 'text', 'content', 'robotCode') if key in payload}
+                'conversationType', 'text', 'content', 'robotCode', 'isInAtList') if key in payload}
         message = ChatbotMessage.from_dict(data)
-        from .attachment_ingress import dingtalk
-        content, refs = dingtalk(data)
-        if content is None:
+        from . import im_inbound
+        inbound = im_inbound.dingtalk(data)
+        if inbound is None:
             return {'ok': True, 'ignored': True}
         if str(message.conversation_type) not in ('1', '2'):
             im._reject(400)
@@ -61,9 +63,11 @@ def receive_dingtalk(payload, factory=SessionLocal):
         with factory.begin() as db:
             ensure_current(db, 'dingtalk')
             return im._enqueue(db, 'dingtalk', message.message_id, message.sender_staff_id,
-                               message.conversation_id, content,
+                               message.conversation_id, inbound.content,
                                str(message.conversation_type) == '2', reply_mode='stream', nickname=payload.get('senderNick'),
-                               **({'attachment_refs': refs} if refs else {}))
+                               chat_name=payload.get('conversationTitle'), notice=inbound.notice,
+                               sender_internal=im_inbound.dingtalk_internal(payload),
+                               **({'attachment_refs': inbound.refs} if inbound.refs else {}))
     except (KeyError, TypeError, AttributeError, ValueError):
         im._reject(400)
 

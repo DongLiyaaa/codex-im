@@ -1,13 +1,16 @@
 """Verified ingress metadata and explicit, scoped IM onboarding."""
 import hashlib
 import json
+import uuid
+from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import Field
+from pydantic import Field, model_validator
 from sqlalchemy import select, func, delete
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 from . import im_settings, policy, schemas, service
 from .db import get_db
-from .models import IMDiscovery, IMScopeBinding, Identity, Group, User, now
+from .models import IM_ONLY_EMAIL_DOMAIN, LOCKED_PASSWORD, IMDiscovery, IMChatName, IMScopeBinding, Identity, Group, User, now, uid
 from .security import current_user
 
 router = APIRouter(prefix='/api/im/discoveries', tags=['im'])
@@ -64,7 +67,50 @@ def reason(db, provider, app_scope, sender, chat, is_group):
     return None, user, group
 
 
-def record(db, provider, app_scope, sender, chat, is_group, rejection, nickname=None):
+def remember_chat_name(db, provider, app_scope, chat, name):
+    # Caller holds the discovery advisory lock; names are display metadata only.
+    from .im_nicknames import clean
+    name = clean(name)
+    if not name:
+        return
+    keys = dict(provider=provider, app_scope=app_scope, chat_id=chat)
+    if not db.get(IMChatName, (provider, app_scope, chat)) and db.scalar(select(func.count()).select_from(IMChatName)) >= 10000:
+        oldest = db.scalar(select(IMChatName).order_by(IMChatName.updated_at).limit(1))
+        if oldest:
+            db.delete(oldest)
+            db.flush()
+    statement = insert(IMChatName).values(**keys, name=name, updated_at=now())
+    db.execute(statement.on_conflict_do_update(index_elements=list(keys),
+        set_={'name': statement.excluded.name, 'updated_at': now()}))
+
+
+def store_chat_names(db, provider, app_scope, names):
+    # Same global discovery lock as record(), so bounded eviction never races ingress.
+    db.scalar(select(func.pg_advisory_xact_lock(71903)))
+    for chat, name in names.items():
+        remember_chat_name(db, provider, app_scope, chat, name)
+
+
+def chat_names(db, rows):
+    chats = {row.chat_id for row in rows if row.chat_type == 'group'}
+    if not chats:
+        return {}
+    return {(r.provider, r.app_scope, r.chat_id): r.name
+            for r in db.scalars(select(IMChatName).where(IMChatName.chat_id.in_(sorted(chats))))}
+
+
+def chat_name_status(row, names):
+    if row.chat_type != 'group':
+        return 'private_chat'
+    if (row.provider, row.app_scope, row.chat_id) in names:
+        return 'available'
+    if row.provider != 'feishu':
+        return 'not_provided'
+    from .im_nicknames import chat_failure
+    return chat_failure(row.app_scope, row.chat_id) or 'not_resolved'
+
+
+def record(db, provider, app_scope, sender, chat, is_group, rejection, nickname=None, chat_name=None):
     # Global bounded metadata set; event tombstones are separate and never evicted.
     db.execute(select(func.pg_advisory_xact_lock(71903)))
     keys = dict(provider=provider, app_scope=app_scope, sender_id=sender, chat_id=chat,
@@ -78,6 +124,8 @@ def record(db, provider, app_scope, sender, chat, is_group, rejection, nickname=
     db.execute(statement.on_conflict_do_update(index_elements=list(keys), set_={
         'last_seen': now(), 'reason': rejection,
         'nickname': func.coalesce(statement.excluded.nickname, IMDiscovery.nickname)}))
+    if is_group and chat_name:
+        remember_chat_name(db, provider, app_scope, chat, chat_name)
 
 
 def admin(actor=Depends(current_user)):
@@ -88,7 +136,9 @@ def admin(actor=Depends(current_user)):
 @router.get('')
 def discoveries(actor=Depends(admin), db=Depends(get_db)):
     result = []
-    for row in db.scalars(select(IMDiscovery).order_by(IMDiscovery.last_seen.desc()).limit(500)):
+    rows = list(db.scalars(select(IMDiscovery).order_by(IMDiscovery.last_seen.desc()).limit(500)))
+    names = chat_names(db, rows)
+    for row in rows:
         with im_settings.snapshot(db, row.provider):
             try:
                 current = scope(row.provider) == row.app_scope
@@ -101,7 +151,29 @@ def discoveries(actor=Depends(admin), db=Depends(get_db)):
         result.append({key: getattr(row, key) for key in ('id', 'provider', 'app_scope', 'sender_id', 'chat_id',
             'chat_type', 'nickname', 'first_seen', 'last_seen', 'reason')} | {
             'status': 'stale_application' if not current else 'pending' if rejection else 'authorized',
-            'current_reason': rejection, 'user_id': user.id if user else None, 'group_id': group.id if group else None})
+            'current_reason': rejection, 'user_id': user.id if user else None, 'group_id': group.id if group else None,
+            'nickname_status': nickname_status(row),
+            'chat_name': names.get((row.provider, row.app_scope, row.chat_id)),
+            'chat_name_status': chat_name_status(row, names)})
+    return result
+
+
+def nickname_status(row):
+    if row.nickname:
+        return 'available'
+    if row.provider != 'feishu':
+        return 'not_provided'
+    from .im_nicknames import failure
+    return failure(row.app_scope, row.sender_id) or 'not_resolved'
+
+
+@router.post('/nicknames')
+def refresh_nicknames(actor=Depends(admin), db=Depends(get_db)):
+    from .im_nicknames import refresh
+    result = refresh(db)
+    service.audit(db, actor, 'im.discovery.nickname_refresh', 'feishu',
+                  {key: result[key] for key in ('status', 'resolved', 'unresolved', 'remaining',
+                                                'chat_resolved', 'chat_unresolved', 'chat_remaining')})
     return result
 
 
@@ -132,9 +204,12 @@ def discovered_groups(actor=Depends(admin), db=Depends(get_db)):
         members = [u for u in bound_users(db, provider, current_scope)
                    if u.id == actor.id or policy.can_manage_user(actor, u)]
         candidates = [{'id': u.id, 'name': u.name, 'org_id': u.org_id, 'team_id': u.team_id, 'role': u.role} for u in members]
+        rows = list(rows)
+        names = {r.chat_id: r.name for r in db.scalars(select(IMChatName).where(IMChatName.provider == provider,
+            IMChatName.app_scope == current_scope, IMChatName.chat_id.in_(sorted({row.chat_id for row in rows}))))} if rows else {}
         for row in rows:
             result.append({'id': row.id, 'provider': provider, 'external_id': row.chat_id,
-                'name': None, 'first_seen': row.first_seen, 'last_seen': row.last_seen,
+                'name': names.get(row.chat_id), 'first_seen': row.first_seen, 'last_seen': row.last_seen,
                 'members': candidates})
     return sorted(result, key=lambda row: (row['last_seen'], row['id']), reverse=True)
 
@@ -195,11 +270,60 @@ def bind_group(identifier: str, body: BindGroup, actor=Depends(admin), db=Depend
     return {'ok': True, 'group_id': group.id}
 
 
+class NewMember(schemas.Input):
+    """Created while approving: an IM-only member with no email, password or web login.
+
+    Only the two non-admin roles are offered; administrators need a real, deliberately created account.
+    """
+    name: str = Field(min_length=1, max_length=200)
+    role: Literal['member', 'team_lead'] = 'member'
+    org_id: str = Field(min_length=1, max_length=100)
+    team_id: str = Field(min_length=1, max_length=100)
+
+
 class Approve(schemas.Input):
-    user_id: str = Field(min_length=1, max_length=36)
+    user_id: str | None = Field(default=None, min_length=1, max_length=36)
+    new_user: NewMember | None = None
     group_id: str | None = Field(default=None, min_length=1, max_length=36)
     new_group: schemas.GroupCreate | None = None
     confirm_member: bool = False
+
+    @model_validator(mode='after')
+    def one_member(self):
+        if (self.user_id is None) == (self.new_user is None):
+            raise ValueError('Choose an existing user or create a new member')
+        if self.new_user and (self.group_id or self.new_group or self.confirm_member):
+            # The group's member list and scope are checked against a member that must already exist.
+            raise ValueError('Register the group after the member is created')
+        return self
+
+
+def check_scope(db, actor, org_id, team_id):
+    """The organization and department must be live directory entries, and the department must belong to the organization."""
+    from .directory import catalog, validate_scope
+    validate_scope(db, org_id, team_id)
+    listing = catalog(db, actor)
+    if not any(o['id'] == org_id for o in listing['organizations']):
+        raise HTTPException(400, 'Unknown organization')
+    if not any(d['id'] == team_id and d['org_id'] == org_id for d in listing['departments']):
+        raise HTTPException(400, 'Unknown department')
+
+
+def create_member(db, actor, data, via='im_discovery'):
+    """Create the IM-only member inside the approval transaction; any later failure rolls it back with the rest."""
+    from .im_nicknames import clean
+    name = clean(data.name)
+    if not name:
+        raise HTTPException(400, 'Member name required')
+    check_scope(db, actor, data.org_id, data.team_id)
+    # An explicit id: the rank check below must never compare an unassigned id with an actor that has none.
+    member = User(id=uid(), email=f'im-{uuid.uuid4().hex}@{IM_ONLY_EMAIL_DOMAIN}', name=name, password_hash=LOCKED_PASSWORD,
+                  role=data.role, org_id=data.org_id, team_id=data.team_id, active=True)
+    policy.require(policy.can_manage_user(actor, member), 'Can only create lower-ranked users in your scope')
+    db.add(member)
+    db.flush()
+    service.audit(db, actor, 'user.create', member.id, {'via': via, 'login_enabled': False, 'role': member.role})
+    return member
 
 
 @router.post('/{identifier}/approve')
@@ -216,11 +340,18 @@ def approve(identifier: str, body: Approve, actor=Depends(admin), db=Depends(get
     with im_settings.snapshot(db, row.provider):
         if scope(row.provider) != row.app_scope:
             raise HTTPException(409, 'Application changed; discover a new message')
-    user = db.get(User, body.user_id)
-    policy.require(user and user.active and (policy.can_manage_user(actor, user) or user.id == actor.id))
-    identity = db.scalar(select(Identity).where(Identity.provider == row.provider, Identity.external_user_id == row.sender_id))
-    if identity and (identity.user_id != user.id or not pinned(db, 'identity', identity.id, row.app_scope)):
-        raise HTTPException(409, 'External identity already bound or application ownership unknown')
+    created = body.new_user is not None
+    if created:
+        identity = db.scalar(select(Identity).where(Identity.provider == row.provider, Identity.external_user_id == row.sender_id))
+        if identity:
+            raise HTTPException(409, 'External identity already bound; choose the existing user')
+        user = create_member(db, actor, body.new_user)
+    else:
+        user = db.get(User, body.user_id)
+        policy.require(user and user.active and (policy.can_manage_user(actor, user) or user.id == actor.id))
+        identity = db.scalar(select(Identity).where(Identity.provider == row.provider, Identity.external_user_id == row.sender_id))
+        if identity and (identity.user_id != user.id or not pinned(db, 'identity', identity.id, row.app_scope)):
+            raise HTTPException(409, 'External identity already bound or application ownership unknown')
     group = None
     if body.group_id and body.new_group:
         raise HTTPException(400, 'Choose one group')
@@ -259,5 +390,67 @@ def approve(identifier: str, body: Approve, actor=Depends(admin), db=Depends(get
     pin(db, 'identity', identity.id, row.app_scope)
     service.audit(db, actor, 'im.discovery.approve', row.id, {'user_id': user.id,
         'group_id': group.id if group else None, 'confirmed_member': body.confirm_member,
-        'app_scope': row.app_scope})
-    return {'ok': True, 'user_id': user.id, 'group_id': group.id if group else None, 'resend_required': True}
+        'app_scope': row.app_scope, 'created_user': created})
+    return {'ok': True, 'user_id': user.id, 'group_id': group.id if group else None, 'resend_required': True,
+            'created_user': created}
+
+
+MAX_BATCH = 50
+
+
+class BatchItem(schemas.Input):
+    discovery_id: str = Field(min_length=1, max_length=36)
+    name: str = Field(min_length=1, max_length=200)
+
+
+class BatchOnboard(schemas.Input):
+    """Several senders of one platform become IM-only members of the same organization, department and role."""
+    items: list[BatchItem] = Field(min_length=1, max_length=MAX_BATCH)
+    role: Literal['member', 'team_lead'] = 'member'
+    org_id: str = Field(min_length=1, max_length=100)
+    team_id: str = Field(min_length=1, max_length=100)
+
+    @model_validator(mode='after')
+    def distinct(self):
+        if len({item.discovery_id for item in self.items}) != len(self.items):
+            raise ValueError('Duplicate discovery')
+        return self
+
+
+@router.post('/onboard-batch')
+def onboard_batch(body: BatchOnboard, actor=Depends(admin), db=Depends(get_db)):
+    """Each sender is onboarded in its own savepoint: one conflict never blocks or undoes the others."""
+    admin(actor)
+    rows = {item.discovery_id: db.get(IMDiscovery, item.discovery_id) for item in body.items}
+    providers = {row.provider for row in rows.values() if row}
+    if len(providers) > 1:
+        # One platform per request keeps the lock order (platform configuration, then directory) identical everywhere.
+        raise HTTPException(400, 'Onboard one platform at a time')
+    provider = next(iter(providers), None)
+    if provider:
+        configuration_lock(db, provider)
+    from .directory import scope_lock
+    scope_lock(db)
+    results, seen = [], set()
+    for item in body.items:
+        row, entry = rows[item.discovery_id], {'id': item.discovery_id, 'ok': False}
+        results.append(entry)
+        if row is None:
+            entry.update(error='Not found', status=404)
+            continue
+        if (row.provider, row.sender_id) in seen:
+            entry.update(error='Duplicate sender in this batch', status=409)
+            continue
+        seen.add((row.provider, row.sender_id))
+        member = NewMember(name=item.name, role=body.role, org_id=body.org_id, team_id=body.team_id)
+        try:
+            with db.begin_nested():
+                done = approve(item.discovery_id, Approve(new_user=member), actor, db)
+            entry.update(ok=True, user_id=done['user_id'])
+        except HTTPException as exc:
+            entry.update(error=str(exc.detail), status=exc.status_code)
+        except IntegrityError:
+            entry.update(error='Conflicting or invalid record', status=409)
+    created = sum(1 for entry in results if entry['ok'])
+    service.audit(db, actor, 'im.discovery.onboard_batch', provider, {'requested': len(results), 'created': created})
+    return {'results': results, 'created': created, 'failed': len(results) - created}
