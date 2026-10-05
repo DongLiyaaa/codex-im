@@ -1,0 +1,13 @@
+.badge.red{background:#fff0ef;color:#b44641}
+.codex-check-actions{display:flex;align-items:center;gap:8px}
+.codex-check{background:white;border:1px solid var(--border);border-radius:11px;padding:0 22px;list-style:none;margin:0}
+.codex-check-row{display:grid;grid-template-columns:20px minmax(96px,150px) 1fr auto;gap:12px;align-items:start;padding:14px 0;border-top:1px solid var(--border)}
+.codex-check-row:first-child{border-top:0}
+.codex-check-row svg{margin-top:2px}
+.codex-check-row svg.ok{color:#2a8a68}
+.codex-check-row svg.fail{color:#b44641}
+.codex-check-row svg.idle{color:#9aa8b6}
+.codex-check-name{font-weight:600;color:#263e50}
+.codex-check-detail{color:#526b80;font-size:13px;overflow-wrap:anywhere}
+.codex-check-foot{margin:8px 2px 0;color:var(--muted);font-size:12px}
+@media(max-width:700px){.codex-check{padding:0 16px}.codex-check-row{grid-template-columns:20px 1fr auto}.codex-check-detail{grid-column:2 / -1}}

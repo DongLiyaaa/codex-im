@@ -38,7 +38,7 @@ def token_hash(token):
     return hmac.new(session_secret().encode(), token.encode(), hashlib.sha256).hexdigest()
 
 
-def current_user(request: Request, db=Depends(get_db)):
+def current_user(request: Request, db=Depends(get_db, scope='function')):
     token = request.cookies.get('hub_session', '')
     session = db.get(SessionToken, token_hash(token)) if token else None
     if not session or session.expires_at <= now():

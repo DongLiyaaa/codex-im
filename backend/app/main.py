@@ -102,20 +102,20 @@ def read_conversation(db, actor, identifier):
 
 
 @app.get('/api/health')
-def health(db=Depends(get_db)):
+def health(db=Depends(get_db, scope='function')):
     from sqlalchemy import text
     db.execute(text('SELECT 1'))
     return {'status': 'ok'}
 
 
 @app.get('/api/setup/status', response_model=bool)
-def setup_status(db=Depends(get_db)):
+def setup_status(db=Depends(get_db, scope='function')):
     from .setup import initialized
     return initialized(db)
 
 
 @app.post('/api/setup/bootstrap', status_code=201)
-def setup_bootstrap(body: schemas.SetupAdmin, request: Request, db=Depends(get_db)):
+def setup_bootstrap(body: schemas.SetupAdmin, request: Request, db=Depends(get_db, scope='function')):
     from .setup import create_admin
     rate_limit('setup:' + (request.client.host if request.client else 'unknown'))
     create_admin(db, body)
@@ -124,7 +124,7 @@ def setup_bootstrap(body: schemas.SetupAdmin, request: Request, db=Depends(get_d
 
 
 @app.post('/api/auth/login', response_model=schemas.UserOut)
-def login(body: schemas.Login, request: Request, response: Response, db=Depends(get_db)):
+def login(body: schemas.Login, request: Request, response: Response, db=Depends(get_db, scope='function')):
     rate_limit(request.client.host if request.client else 'unknown')
     user = db.scalar(select(User).where(User.email == body.email))
     encoded = user.password_hash if user else hash_password('dummy-password')
@@ -143,7 +143,7 @@ def login(body: schemas.Login, request: Request, response: Response, db=Depends(
 
 
 @app.post('/api/auth/logout')
-def logout(request: Request, response: Response, db=Depends(get_db)):
+def logout(request: Request, response: Response, db=Depends(get_db, scope='function')):
     token = request.cookies.get('hub_session')
     session = db.get(SessionToken, token_hash(token)) if token else None
     if session:
@@ -164,12 +164,12 @@ def user_out(actor, user):
 
 
 @app.get('/api/users', response_model=list[schemas.UserOut])
-def users(actor=Depends(current_user), db=Depends(get_db)):
+def users(actor=Depends(current_user), db=Depends(get_db, scope='function')):
     return [user_out(actor, u) for u in db.scalars(select(User)) if u.id == actor.id or policy.can_manage_user(actor, u)]
 
 
 @app.post('/api/users', response_model=schemas.UserOut, status_code=201)
-def create_user(body: schemas.UserCreate, actor=Depends(current_user), db=Depends(get_db)):
+def create_user(body: schemas.UserCreate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     from .directory import validate_scope
     validate_scope(db, body.org_id, body.team_id)
     target = User(**body.model_dump(exclude={'password'}), password_hash=hash_password(body.password))
@@ -181,7 +181,7 @@ def create_user(body: schemas.UserCreate, actor=Depends(current_user), db=Depend
 
 
 @app.patch('/api/users/{identifier}', response_model=schemas.UserOut)
-def update_user(identifier: str, body: schemas.UserUpdate, actor=Depends(current_user), db=Depends(get_db)):
+def update_user(identifier: str, body: schemas.UserUpdate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     from . import user_lifecycle
     target = user_lifecycle.manageable(db, actor, identifier)
     user_lifecycle.apply(db, actor, target, body)
@@ -199,12 +199,12 @@ def group_out(db, actor, group):
 
 
 @app.get('/api/groups', response_model=list[schemas.GroupOut])
-def groups(actor=Depends(current_user), db=Depends(get_db)):
+def groups(actor=Depends(current_user), db=Depends(get_db, scope='function')):
     return [group_out(db, actor, g) for g in db.scalars(select(Group)) if policy.can_read_group(db, actor, g)]
 
 
 @app.patch('/api/groups/{identifier}', response_model=schemas.GroupOut)
-def edit_group(identifier: str, body: schemas.GroupUpdate, actor=Depends(current_user), db=Depends(get_db)):
+def edit_group(identifier: str, body: schemas.GroupUpdate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     group = service.lock_group(db, identifier)
     policy.require(policy.can_manage_group(db, actor, group))
     service.require_idle_group(db, identifier)
@@ -220,7 +220,7 @@ def edit_group(identifier: str, body: schemas.GroupUpdate, actor=Depends(current
 
 
 @app.delete('/api/groups/{identifier}')
-def delete_group(identifier: str, actor=Depends(current_user), db=Depends(get_db)):
+def delete_group(identifier: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     group = service.lock_group(db, identifier)
     policy.require(policy.can_manage_group(db, actor, group))
     service.require_idle_group(db, identifier)
@@ -230,7 +230,7 @@ def delete_group(identifier: str, actor=Depends(current_user), db=Depends(get_db
 
 
 @app.post('/api/groups', response_model=schemas.GroupOut, status_code=201)
-def create_group(body: schemas.GroupCreate, actor=Depends(current_user), db=Depends(get_db)):
+def create_group(body: schemas.GroupCreate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     from .directory import validate_scope
     group = Group(**body.model_dump())
     if group.provider != 'web':
@@ -259,12 +259,12 @@ def visible_resources(db, actor):
 
 
 @app.get('/api/resources')
-def resources(actor=Depends(current_user), db=Depends(get_db)):
+def resources(actor=Depends(current_user), db=Depends(get_db, scope='function')):
     return [service.resource_out(r, actor) for r in visible_resources(db, actor)]
 
 
 @app.post('/api/resources', status_code=201)
-def create_resource(body: schemas.ResourceCreate, actor=Depends(current_user), db=Depends(get_db)):
+def create_resource(body: schemas.ResourceCreate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     from .directory import validate_scope
     validate_scope(db, body.org_id, None)
     resource = Resource(**body.model_dump())
@@ -277,12 +277,12 @@ def create_resource(body: schemas.ResourceCreate, actor=Depends(current_user), d
 
 
 @app.get('/api/bindings', response_model=list[schemas.BindingOut])
-def bindings(actor=Depends(current_user), db=Depends(get_db)):
+def bindings(actor=Depends(current_user), db=Depends(get_db, scope='function')):
     return [b for b in db.scalars(select(Binding)) if policy.can_manage_binding(db, actor, b) or (b.subject_type == 'user' and b.subject_id == actor.id)]
 
 
 @app.post('/api/bindings', response_model=schemas.BindingOut, status_code=201)
-def create_binding(body: schemas.BindingCreate, actor=Depends(current_user), db=Depends(get_db)):
+def create_binding(body: schemas.BindingCreate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     binding = Binding(**body.model_dump())
     if binding.subject_type == 'group':
         service.lock_group(db, binding.subject_id)
@@ -294,7 +294,7 @@ def create_binding(body: schemas.BindingCreate, actor=Depends(current_user), db=
 
 
 @app.delete('/api/bindings/{identifier}')
-def delete_binding(identifier: str, actor=Depends(current_user), db=Depends(get_db)):
+def delete_binding(identifier: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     binding = get_or_404(db, Binding, identifier)
     policy.require(policy.can_manage_binding(db, actor, binding))
     db.delete(binding)
@@ -303,13 +303,13 @@ def delete_binding(identifier: str, actor=Depends(current_user), db=Depends(get_
 
 
 @app.get('/api/identities', response_model=list[schemas.IdentityOut])
-def identities(actor=Depends(current_user), db=Depends(get_db)):
+def identities(actor=Depends(current_user), db=Depends(get_db, scope='function')):
     return [i for i in db.scalars(select(Identity)) if (target := db.get(User, i.user_id)) and
             (i.user_id == actor.id or policy.can_manage_user(actor, target))]
 
 
 @app.post('/api/identities', response_model=schemas.IdentityOut, status_code=201)
-def create_identity(body: schemas.IdentityCreate, actor=Depends(current_user), db=Depends(get_db)):
+def create_identity(body: schemas.IdentityCreate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     policy.require(actor.role == 'super_admin', 'Global IM mappings require super_admin')
     target = get_or_404(db, User, body.user_id)
     policy.require(target.active and (policy.can_manage_user(actor, target) or
@@ -332,17 +332,17 @@ def conversation_out(db, actor, conversation):
 
 
 @app.delete('/api/conversations/{identifier}')
-def delete_conversation(identifier: str, actor=Depends(current_user), db=Depends(get_db)):
+def delete_conversation(identifier: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     return service.archive_conversation(db, actor, identifier)
 
 
 @app.get('/api/conversations', response_model=list[schemas.ConversationOut])
-def conversations(actor=Depends(current_user), db=Depends(get_db)):
+def conversations(actor=Depends(current_user), db=Depends(get_db, scope='function')):
     return [conversation_out(db, actor, c) for c in db.scalars(select(Conversation).where(Conversation.archived_at.is_(None)).order_by(Conversation.created_at.desc())) if policy.can_read_conversation(db, actor, c)]
 
 
 @app.post('/api/conversations', response_model=schemas.ConversationOut, status_code=201)
-def create_conversation(body: schemas.ConversationCreate, actor=Depends(current_user), db=Depends(get_db)):
+def create_conversation(body: schemas.ConversationCreate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     if body.group_id:
         group = service.lock_group(db, body.group_id)
         policy.require(policy.is_group_member(actor, group))
@@ -354,7 +354,7 @@ def create_conversation(body: schemas.ConversationCreate, actor=Depends(current_
 
 
 @app.get('/api/conversations/{identifier}/messages', response_model=list[schemas.MessageOut])
-def messages(identifier: str, actor=Depends(current_user), db=Depends(get_db)):
+def messages(identifier: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     read_conversation(db, actor, identifier)
     from .attachments import for_message
     entries = list(db.scalars(select(Message).where(Message.conversation_id == identifier).order_by(Message.created_at, Message.id)))
@@ -363,7 +363,7 @@ def messages(identifier: str, actor=Depends(current_user), db=Depends(get_db)):
 
 
 @app.get('/api/conversations/{identifier}/state', response_model=schemas.ConversationStateOut)
-def conversation_state(identifier: str, actor=Depends(current_user), db=Depends(get_db)):
+def conversation_state(identifier: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     # Status polling is read-only; message-open auditing remains on /messages.
     conversation = get_or_404(db, Conversation, identifier)
     policy.require(policy.can_read_conversation(db, actor, conversation))
@@ -385,7 +385,7 @@ def conversation_state(identifier: str, actor=Depends(current_user), db=Depends(
 
 
 @app.post('/api/conversations/{identifier}/messages', status_code=202)
-def send_message(identifier: str, body: schemas.MessageCreate, actor=Depends(current_user), db=Depends(get_db)):
+def send_message(identifier: str, body: schemas.MessageCreate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     conversation = get_or_404(db, Conversation, identifier)
     from . import approvals
     decision = None if body.attachment_ids else approvals.parse(body.content)
@@ -401,14 +401,14 @@ def send_message(identifier: str, body: schemas.MessageCreate, actor=Depends(cur
 
 
 @app.get('/api/runs/{identifier}', response_model=schemas.RunOut)
-def run_status(identifier: str, actor=Depends(current_user), db=Depends(get_db)):
+def run_status(identifier: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     run = get_or_404(db, Run, identifier)
     read_conversation(db, actor, run.conversation_id)
     return run
 
 
 @app.get('/api/conversations/{identifier}/capabilities')
-def capabilities(identifier: str, actor=Depends(current_user), db=Depends(get_db)):
+def capabilities(identifier: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     conversation = read_conversation(db, actor, identifier)
     result = {'skills': [], 'mcps': []}
     for resource in policy.effective_resources(db, actor, conversation):
@@ -417,7 +417,7 @@ def capabilities(identifier: str, actor=Depends(current_user), db=Depends(get_db
 
 
 @app.get('/api/overview')
-def overview(actor=Depends(current_user), db=Depends(get_db)):
+def overview(actor=Depends(current_user), db=Depends(get_db, scope='function')):
     visible = conversations(actor, db)
     ids = [c.id for c in visible]
     return {'users': len(users(actor, db)), 'groups': len(groups(actor, db)), 'conversations': len(ids),
@@ -425,7 +425,7 @@ def overview(actor=Depends(current_user), db=Depends(get_db)):
 
 
 @app.get('/api/audit')
-def audit_events(actor=Depends(current_user), db=Depends(get_db)):
+def audit_events(actor=Depends(current_user), db=Depends(get_db, scope='function')):
     policy.require(actor.role != 'member')
     allowed = [u.id for u in users(actor, db)]
     query = select(Audit).order_by(Audit.created_at.desc()).limit(500)
@@ -436,7 +436,7 @@ def audit_events(actor=Depends(current_user), db=Depends(get_db)):
 
 @app.get('/api/audit/page')
 def audit_page(page: int = Query(1, ge=1, le=2147483647), page_size: int = Query(50),
-               actor=Depends(current_user), db=Depends(get_db)):
+               actor=Depends(current_user), db=Depends(get_db, scope='function')):
     policy.require(actor.active and actor.role != 'member')
     if page_size not in (50, 100):
         raise HTTPException(422, 'page_size must be 50 or 100')
@@ -464,19 +464,19 @@ def platform_admin(actor=Depends(current_user)):
 
 
 @app.get('/api/integrations/config/{provider}')
-def integration_config(provider: str, actor=Depends(platform_admin), db=Depends(get_db)):
+def integration_config(provider: str, actor=Depends(platform_admin), db=Depends(get_db, scope='function')):
     return im_settings.view(db, provider)
 
 
 @app.put('/api/integrations/config/{provider}')
-def save_integration_config(provider: str, body: im_settings.Update, actor=Depends(platform_admin), db=Depends(get_db)):
+def save_integration_config(provider: str, body: im_settings.Update, actor=Depends(platform_admin), db=Depends(get_db, scope='function')):
     result = im_settings.save(db, provider, body)
     service.audit(db, actor, 'im.configuration.update', provider, {'revision': result['revision']})
     return result
 
 
 @app.get('/api/integrations/status')
-def integrations(actor=Depends(platform_admin), db=Depends(get_db)):
+def integrations(actor=Depends(platform_admin), db=Depends(get_db, scope='function')):
     from .models import IMConnection
     result = {'runner': {'configured': bool(os.getenv('RUNNER_TOKEN'))}}
     for provider in ('feishu', 'dingtalk'):
@@ -515,6 +515,8 @@ else:
 
 from .directory import router as directory_router
 app.include_router(directory_router)
+from .codex_status import router as codex_status_router
+app.include_router(codex_status_router)
 
 # API routes and IM callbacks are registered before the SPA fallback.
 STATIC_DIR = Path(os.getenv('STATIC_DIR', str(Path(__file__).resolve().parents[2] / 'frontend' / 'dist'))).resolve()

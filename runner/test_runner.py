@@ -15,6 +15,10 @@ m = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = m
 spec.loader.exec_module(m)
 
+probe_spec = importlib.util.spec_from_file_location("hub_sandbox_probe", Path(__file__).with_name("sandbox_probe.py"))
+probe = importlib.util.module_from_spec(probe_spec)
+probe_spec.loader.exec_module(probe)
+
 
 @pytest.fixture(autouse=True)
 def settings(monkeypatch):
@@ -24,6 +28,8 @@ def settings(monkeypatch):
     monkeypatch.delenv("CODEX_AUTH_MODE", raising=False)
     monkeypatch.delenv("CODEX_OAUTH_AUTH_FILE", raising=False)
     monkeypatch.delenv("CODEX_PROXY_URL", raising=False)
+    monkeypatch.delenv("CODEX_MODEL", raising=False)
+    monkeypatch.delenv("CODEX_BASE_URL", raising=False)
     m.app.state.active = 0
 
 
@@ -59,6 +65,94 @@ def test_optional_proxy_reaches_codex_but_not_local_bridges(tmp_path, monkeypatc
             m.proxy_env()
 
 
+def test_proxy_bypass_includes_the_service_hosts_of_the_internal_bridges(monkeypatch):
+    monkeypatch.setenv('CODEX_PROXY_URL', 'http://host.docker.internal:7890')
+    monkeypatch.setenv('PLATFORM_BRIDGE_URL', 'http://api:18200/internal/platform-mcp')
+    monkeypatch.setenv('ATTACHMENT_BRIDGE_URL', 'http://API:18200/internal/attachment-mcp')
+    bypass = m.proxy_env()['NO_PROXY'].split(',')
+    assert bypass == ['127.0.0.1', 'localhost', '::1', 'api']  # Once, lower-cased, never the model proxy itself.
+    monkeypatch.setenv('PLATFORM_BRIDGE_URL', 'not a url')
+    monkeypatch.setenv('ATTACHMENT_BRIDGE_URL', '')
+    assert m.proxy_env()['NO_PROXY'] == '127.0.0.1,localhost,::1'
+
+
+def written_config(tmp_path, key="secret-model-key"):
+    _, env = m.prepare(tmp_path, payload(), key)
+    path = Path(env["CODEX_HOME"]) / "config.toml"
+    return tomllib.loads(path.read_text()), path.read_text(), env
+
+
+def test_default_has_no_model_or_provider_override(tmp_path):
+    config, _, _ = written_config(tmp_path)
+    assert "model" not in config and "model_provider" not in config and "model_providers" not in config
+
+
+def test_custom_model_and_endpoint_reach_codex_without_the_key_in_the_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_MODEL", "gpt-6.1-sol")
+    monkeypatch.setenv("CODEX_BASE_URL", "https://models.example.com/v1/")
+    config, text, env = written_config(tmp_path)
+    assert config["model"] == "gpt-6.1-sol" and config["model_provider"] == "hub_model"
+    assert config["model_providers"]["hub_model"] == {
+        "name": "Hub model endpoint", "base_url": "https://models.example.com/v1", "env_key": "CODEX_API_KEY", "wire_api": "responses"}
+    assert env["CODEX_API_KEY"] == "secret-model-key" and "secret-model-key" not in text
+    assert config["forced_login_method"] == "api" and config["sandbox_mode"] == "read-only"  # Isolation settings stay in force.
+
+
+def test_model_alone_keeps_the_default_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_MODEL", "gpt-6.1-sol")
+    config, _, _ = written_config(tmp_path)
+    assert config["model"] == "gpt-6.1-sol" and "model_provider" not in config and "model_providers" not in config
+
+
+@pytest.mark.parametrize("url", [
+    "http://models.example.com/v1", "ftp://models.example.com/v1", "models.example.com/v1", "https://",
+    "https://user:pass@models.example.com/v1", "https://models.example.com/v1?key=1", "https://models.example.com/v1#x",
+    "https://models.example.com:8443/v1", "https://models.example.com/v1 /x", "https://models.example.com/v1/../x?",
+    "https://localhost/v1", "https://LOCALHOST./v1", "https://127.0.0.1/v1", "https://[::1]/v1", "https://10.0.0.5/v1",
+    "https://192.168.1.10/v1", "https://169.254.169.254/latest", "https://172.16.0.1/v1", "https://100.64.0.1/v1",
+    "https://[::ffff:127.0.0.1]/v1", "https://[fd00::1]/v1", "https://db/v1", "https://api.internal/v1", "https://printer.local/v1",
+    "https://host.localhost/v1", "https://models.example.com:abc/v1",
+])
+def test_unsafe_endpoints_are_refused_everywhere(tmp_path, monkeypatch, url):
+    monkeypatch.setenv("CODEX_BASE_URL", url)
+    with pytest.raises(ValueError, match="INVALID_CODEX_BASE_URL"):
+        m.model_settings()
+    assert m.configured() == (None, "INVALID_CODEX_BASE_URL")  # Visible in /health, and every /execute is refused.
+    with TestClient(m.app) as client:
+        assert client.get("/health").json()["error"] == "INVALID_CODEX_BASE_URL"
+
+
+def test_public_ip_literals_and_plain_names_are_accepted(monkeypatch):
+    for url in ("https://8.8.8.8/v1", "https://models.example.com", "https://a.b.example.org/openai/v1"):
+        monkeypatch.setenv("CODEX_BASE_URL", url)
+        assert m.model_settings() == (None, url)
+
+
+@pytest.mark.parametrize("model", ["bad model", "gpt;rm", "../x", "-x", "x" * 101, "a\nb", "gpt-6.1-sol\"", "é"])
+def test_invalid_model_ids_are_refused(monkeypatch, model):
+    monkeypatch.setenv("CODEX_MODEL", model)
+    assert m.configured() == (None, "INVALID_CODEX_MODEL")
+
+
+def test_a_chatgpt_login_is_never_pointed_at_a_custom_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_AUTH_MODE", "chatgpt")
+    monkeypatch.setenv("CODEX_BASE_URL", "https://models.example.com/v1")
+    assert m.configured() == (None, "CODEX_BASE_URL_REQUIRES_API_MODE")
+    with TestClient(m.app) as client:
+        assert client.get("/health").json()["error"] == "CODEX_BASE_URL_REQUIRES_API_MODE"
+    monkeypatch.delenv("CODEX_BASE_URL")
+    monkeypatch.setenv("CODEX_MODEL", "gpt-6.1-sol")  # A model name alone is harmless in ChatGPT mode.
+    assert m.configured()[1] == "OAUTH_SOURCE_NOT_CONFIGURED"
+
+
+def test_custom_endpoint_does_not_change_proxy_or_bridge_behaviour(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_BASE_URL", "https://models.example.com/v1")
+    monkeypatch.setenv("CODEX_PROXY_URL", "http://host.docker.internal:7890")
+    monkeypatch.setenv("PLATFORM_BRIDGE_URL", "http://api:18200/internal/platform-mcp")
+    _, _, env = written_config(tmp_path)
+    assert env["HTTPS_PROXY"] == "http://host.docker.internal:7890" and "api" in env["NO_PROXY"].split(",")
+
+
 def test_auth_and_validation_do_not_echo_secrets():
     with TestClient(m.app) as client:
         assert client.post("/execute", json={}).status_code == 401
@@ -74,6 +168,71 @@ def test_health_and_missing_credentials(monkeypatch):
         assert client.get("/health").json()["error"] == "MODEL_API_KEY_NOT_CONFIGURED"
         assert client.post("/execute", headers={"Authorization": "Bearer " + "t" * 40},
                            json=payload().model_dump()).status_code == 503
+
+
+@pytest.fixture
+def fresh_sandbox_cache():
+    m._sandbox_health.update(at=-1e9, error=None)
+    yield
+    m._sandbox_health.update(at=-1e9, error=None)
+
+
+def linux_runner(monkeypatch, outcome):
+    monkeypatch.setattr(m.shutil, "which", lambda _: "/usr/local/bin/codex")
+    monkeypatch.setattr(m.sys, "platform", "linux")
+    calls = []
+
+    async def fake_process(argv, cwd, env, stdin=b"", **kwargs):
+        calls.append(argv)
+        if outcome == "fail":
+            raise m.RunnerError("CODEX_EXECUTION_FAILED")
+        if outcome == "hang":
+            await asyncio.sleep(60)
+    monkeypatch.setattr(m, "process", fake_process)
+    return calls
+
+
+def test_health_is_not_ready_while_the_sandbox_cannot_start(monkeypatch, fresh_sandbox_cache):
+    calls = linux_runner(monkeypatch, "fail")
+    with TestClient(m.app) as client:
+        body = client.get("/health").json()
+    assert body["status"] == "not_ready" and body["error"] == "SANDBOX_UNAVAILABLE"
+    assert calls and calls[0][1] == "sandbox" and calls[0][-1] == str(m.SANDBOX_PROBE)  # Never contacts a model.
+
+
+def test_health_is_ready_when_the_sandbox_works_and_the_check_is_cached(monkeypatch, fresh_sandbox_cache):
+    calls = linux_runner(monkeypatch, "ok")
+    with TestClient(m.app) as client:
+        assert [client.get("/health").json()["status"] for _ in range(3)] == ["ready"] * 3
+    assert len(calls) == 1  # One preflight serves the whole cache window.
+
+
+def test_health_rechecks_after_the_cache_expires(monkeypatch, fresh_sandbox_cache):
+    calls = linux_runner(monkeypatch, "ok")
+    with TestClient(m.app) as client:
+        client.get("/health")
+        m._sandbox_health["at"] -= m.SANDBOX_HEALTH_TTL + 1
+        client.get("/health")
+    assert len(calls) == 2
+
+
+def test_a_hanging_sandbox_check_is_reported_not_waited_for_forever(monkeypatch, fresh_sandbox_cache):
+    import time as clock
+    linux_runner(monkeypatch, "hang")
+    real_timeout = asyncio.timeout
+    monkeypatch.setattr(m.asyncio, "timeout", lambda seconds: real_timeout(0.2))
+    started = clock.monotonic()
+    with TestClient(m.app) as client:
+        assert client.get("/health").json()["error"] == "SANDBOX_UNAVAILABLE"
+    assert clock.monotonic() - started < 5
+
+
+def test_missing_credentials_are_reported_before_any_sandbox_check(monkeypatch, fresh_sandbox_cache):
+    calls = linux_runner(monkeypatch, "ok")
+    monkeypatch.delenv("OPENAI_API_KEY")
+    with TestClient(m.app) as client:
+        assert client.get("/health").json()["error"] == "MODEL_API_KEY_NOT_CONFIGURED"
+    assert calls == []
 
 
 def test_isolation_config(tmp_path, monkeypatch):
@@ -216,6 +375,48 @@ def test_execute_args_redaction_cleanup(monkeypatch):
     monkeypatch.setattr(m, "process", fake)
     assert asyncio.run(m.execute(payload(), "secret-model-key")) == "[REDACTED] answer"
     assert all(not p.exists() for p in paths)
+
+
+def simulated_sandbox(monkeypatch, tmp_path, *, write, sockets="allowed", connect=None):
+    """Makes the probe see a filesystem and network behaving as the given sandbox would."""
+    monkeypatch.chdir(tmp_path)
+    denied = PermissionError(1, "Operation not permitted")
+    if write == "denied":
+        monkeypatch.setattr(probe.pathlib.Path, "write_text", lambda *a, **k: (_ for _ in ()).throw(denied))
+    if sockets == "denied":
+        monkeypatch.setattr(probe.socket, "socket", lambda *a, **k: (_ for _ in ()).throw(denied))
+    else:
+        class Socket:
+            def settimeout(self, seconds):
+                pass
+
+            def connect(self, address):
+                if connect is not None:
+                    raise connect
+        monkeypatch.setattr(probe.socket, "socket", Socket)
+    return probe.check()
+
+
+def test_probe_detects_a_writable_filesystem(monkeypatch, tmp_path):
+    assert simulated_sandbox(monkeypatch, tmp_path, write="allowed") == probe.WRITABLE == 41
+
+
+def test_probe_detects_outbound_network_when_writing_is_blocked(monkeypatch, tmp_path):
+    assert simulated_sandbox(monkeypatch, tmp_path, write="denied") == probe.NETWORK == 42
+
+
+def test_probe_passes_when_the_sandbox_refuses_to_create_a_socket(monkeypatch, tmp_path):
+    """Codex's Linux sandbox removes sockets altogether; that is enforcement, not a failure (it used to crash the probe)."""
+    assert simulated_sandbox(monkeypatch, tmp_path, write="denied", sockets="denied") == 0
+
+
+@pytest.mark.parametrize("error", [TimeoutError("timed out"), ConnectionRefusedError(111, "refused"), OSError(101, "unreachable")])
+def test_probe_passes_when_connections_fail(monkeypatch, tmp_path, error):
+    assert simulated_sandbox(monkeypatch, tmp_path, write="denied", connect=error) == 0
+
+
+def test_the_runner_executes_the_fixed_probe_file_not_a_string():
+    assert m.SANDBOX_PROBE == Path(__file__).resolve().with_name("sandbox_probe.py") and m.SANDBOX_PROBE.is_file()
 
 
 def test_linux_fail_closed(monkeypatch):

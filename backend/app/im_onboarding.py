@@ -106,12 +106,12 @@ def view(db, provider, row):
 
 
 @router.get('')
-def policies(actor=Depends(im_discovery.admin), db=Depends(get_db)):
+def policies(actor=Depends(im_discovery.admin), db=Depends(get_db, scope='function')):
     return [view(db, provider, db.get(IMOnboardingPolicy, provider)) for provider in PROVIDERS]
 
 
 @router.put('/{provider}')
-def save(provider: Literal['feishu', 'dingtalk'], body: PolicyBody, actor=Depends(im_discovery.admin), db=Depends(get_db)):
+def save(provider: Literal['feishu', 'dingtalk'], body: PolicyBody, actor=Depends(im_discovery.admin), db=Depends(get_db, scope='function')):
     im_discovery.configuration_lock(db, provider)
     if body.enabled:
         # Only an enabled policy has to point at live directory entries; switching one off must always work.

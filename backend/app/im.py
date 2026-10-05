@@ -259,7 +259,7 @@ def _enqueue(db, provider, event_id, sender_id, chat_id, content, is_group, repl
 
 
 @router.post('/feishu/callback')
-async def feishu_callback(request: Request, db=Depends(get_db)):
+async def feishu_callback(request: Request, db=Depends(get_db, scope='function')):
     if db is None:  # Direct protocol unit tests.
         return await _feishu_callback(request, db)
     from .im_discovery import configuration_lock
@@ -298,7 +298,7 @@ async def _feishu_callback(request, db):
 
 
 @router.post('/dingtalk/callback')
-async def dingtalk_callback(request: Request, db=Depends(get_db)):
+async def dingtalk_callback(request: Request, db=Depends(get_db, scope='function')):
     if db is None:
         return await _dingtalk_callback(request, db)
     from .im_discovery import configuration_lock

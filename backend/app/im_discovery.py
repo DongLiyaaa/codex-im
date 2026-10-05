@@ -134,7 +134,7 @@ def admin(actor=Depends(current_user)):
 
 
 @router.get('')
-def discoveries(actor=Depends(admin), db=Depends(get_db)):
+def discoveries(actor=Depends(admin), db=Depends(get_db, scope='function')):
     result = []
     rows = list(db.scalars(select(IMDiscovery).order_by(IMDiscovery.last_seen.desc()).limit(500)))
     names = chat_names(db, rows)
@@ -168,7 +168,7 @@ def nickname_status(row):
 
 
 @router.post('/nicknames')
-def refresh_nicknames(actor=Depends(admin), db=Depends(get_db)):
+def refresh_nicknames(actor=Depends(admin), db=Depends(get_db, scope='function')):
     from .im_nicknames import refresh
     result = refresh(db)
     service.audit(db, actor, 'im.discovery.nickname_refresh', 'feishu',
@@ -185,7 +185,7 @@ def bound_users(db, provider, app_scope):
 
 
 @router.get('/groups')
-def discovered_groups(actor=Depends(admin), db=Depends(get_db)):
+def discovered_groups(actor=Depends(admin), db=Depends(get_db, scope='function')):
     admin(actor)
     result = []
     for provider in ('feishu', 'dingtalk'):
@@ -224,7 +224,7 @@ class BindGroup(schemas.Input):
 
 
 @router.post('/groups/{identifier}/bind')
-def bind_group(identifier: str, body: BindGroup, actor=Depends(admin), db=Depends(get_db)):
+def bind_group(identifier: str, body: BindGroup, actor=Depends(admin), db=Depends(get_db, scope='function')):
     admin(actor)
     row = db.get(IMDiscovery, identifier)
     if not row or row.chat_type != 'group':
@@ -327,7 +327,7 @@ def create_member(db, actor, data, via='im_discovery'):
 
 
 @router.post('/{identifier}/approve')
-def approve(identifier: str, body: Approve, actor=Depends(admin), db=Depends(get_db)):
+def approve(identifier: str, body: Approve, actor=Depends(admin), db=Depends(get_db, scope='function')):
     # Enforce authorization even for direct callers; all writes commit atomically.
     admin(actor)
     row = db.get(IMDiscovery, identifier)
@@ -418,7 +418,7 @@ class BatchOnboard(schemas.Input):
 
 
 @router.post('/onboard-batch')
-def onboard_batch(body: BatchOnboard, actor=Depends(admin), db=Depends(get_db)):
+def onboard_batch(body: BatchOnboard, actor=Depends(admin), db=Depends(get_db, scope='function')):
     """Each sender is onboarded in its own savepoint: one conflict never blocks or undoes the others."""
     admin(actor)
     rows = {item.discovery_id: db.get(IMDiscovery, item.discovery_id) for item in body.items}

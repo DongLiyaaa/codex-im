@@ -32,7 +32,7 @@
 
 链接只接受飞书/钉钉官方域名的 HTTPS 地址，类型与链接不符返回 `kind_mismatch`，资源不存在或无权访问返回 `resource_not_found`。
 
-安全边界：每次调用使用一次性 HOME/配置目录与最小环境变量，正文经 stdin 传入；飞书机器人身份由 Hub 自己换取短期 tenant token 并以 `LARKSUITE_CLI_TENANT_ACCESS_TOKEN` 注入，App Secret 不交给 CLI；本人身份只注入短期 user access token；只返回飞书/钉钉官方域名下的链接、资源 ID 与结构化数据，不返回 CLI 原始错误或令牌；审计 `platform.workspace.create/read/write` 只记录平台、类型、身份、资源 ID 与写入方式，不记录标题、正文和读到的内容；每人每分钟最多 10 次（创建、读、写分别计数）。CLI 安装在项目内 `.runtime/platform-cli`（`npm install @larksuite/cli@1.0.97 dingtalk-workspace-cli@1.0.62`），也可用 `PLATFORM_LARK_CLI` / `PLATFORM_DWS_CLI` 指向其它路径；现有 Docker 镜像尚未内置这两个 CLI，容器部署前需另行加入并审核。钉钉链路已有自动化测试，但因当前环境未配置钉钉应用，尚未做真实平台验收。
+安全边界：每次调用使用一次性 HOME/配置目录与最小环境变量，正文经 stdin 传入；飞书机器人身份由 Hub 自己换取短期 tenant token 并以 `LARKSUITE_CLI_TENANT_ACCESS_TOKEN` 注入，App Secret 不交给 CLI；本人身份只注入短期 user access token；只返回飞书/钉钉官方域名下的链接、资源 ID 与结构化数据，不返回 CLI 原始错误或令牌；审计 `platform.workspace.create/read/write` 只记录平台、类型、身份、资源 ID 与写入方式，不记录标题、正文和读到的内容；每人每分钟最多 10 次（创建、读、写分别计数）。CLI 安装在项目内 `.runtime/platform-cli`（`npm install @larksuite/cli@1.0.97 dingtalk-workspace-cli@1.0.62`），也可用 `PLATFORM_LARK_CLI` / `PLATFORM_DWS_CLI` 指向其它路径；Docker 镜像构建时会单独下载并内置 linux/amd64 版本的这两个 CLI（开发机上的 macOS 版本不能放进镜像），路径由 `PLATFORM_LARK_CLI` / `PLATFORM_DWS_CLI` 指定；已在 uid 10001、只读根文件系统下验证可运行，但容器内的真实飞书/钉钉调用尚未做过验收。钉钉链路已有自动化测试，但因当前环境未配置钉钉应用，尚未做真实平台验收。
 
 ## 高风险操作审批（参考 cc-connect 的权限确认，但由服务端核验）
 
@@ -111,20 +111,37 @@ PG独立保存 attachments、attachment_jobs、attachment_artifacts，并绑定m
 .venv/bin/python scripts/run_attachment_local.py
 ```
 
-worker以PG advisory lock保证本地唯一实例，周期清理过期未发送草稿及孤立目录。部署容器时API与worker需共享专属附件卷、runner不挂原件卷；新volume/服务名/网络/CPU内存/端口与旧服务影响必须先人工审核，当前未创建或启动容器。配置及备份不得暴露签名URL、downloadCode、token或用户文件。
+worker以PG advisory lock保证本地唯一实例，周期清理过期未发送草稿及孤立目录。容器部署时API与worker共享专属附件卷（`hub_attachments`）、runner不挂原件卷；新volume/服务名/网络/CPU内存/端口与旧服务影响必须先人工审核（见 [容器影响清单](docs/DOCKER_IMPACT.md)）。配置及备份不得暴露签名URL、downloadCode、token或用户文件。
 
 ## 安装与首次初始化
 
 准备 Python 3.12、Node.js 与 PostgreSQL。使用 Docker 前先审核 [容器影响清单](docs/DOCKER_IMPACT.md)，确认端口、资源、网络、卷与现有服务隔离。
 
 ```bash
-python3 scripts/init_env.py
-# 根据部署环境配置 .env 中的模型及可选 IM 凭据
-docker compose config --quiet
-docker compose up -d --build
+# 端口按需选择（本机已有服务占用 18200 时用别的端口）；生成独立随机密钥，文件权限 0600，已存在则拒绝覆盖
+python3 scripts/init_env.py .env.docker 18210
+# 根据部署环境填写 .env.docker 中的模型凭据；IM 凭据可以留空，在网页里配置并加密保存到 PG
+docker compose --env-file .env.docker config --quiet
+docker compose --env-file .env.docker up -d --build db api attachments runner
 ```
 
-默认仅监听 http://127.0.0.1:18200。在本机浏览器打开，填写「初始化管理员」的姓名、邮箱、至少 12 位密码与确认密码。第一个成功注册的账号成为启用的超级管理员，随后返回登录页。其余账号由管理员创建。
+Compose 栈由自带的 `db`（PostgreSQL 16）、`api`、`attachments`（附件解析 worker）、`runner` 四个服务组成，全部 `linux/amd64`、非 root、只读根文件系统、`cap_drop: ALL`。启动顺序按健康检查串联：`db` 健康后启动 `api`，`api` 健康（业务表已迁移）后才启动 `attachments`。镜像内置官方 `lark-cli` 1.0.97 与 `dws` 1.0.62（构建时下载 linux/amd64 版本，开发机上的 macOS 版本不能放进镜像），路径由 `PLATFORM_LARK_CLI` / `PLATFORM_DWS_CLI` 指定。网页只发布到 `${HUB_BIND:-127.0.0.1}:${HUB_PORT:-18200}`，`APP_ORIGIN` 必须与浏览器实际访问的地址一致。
+
+几个容易踩的点：
+
+- **runner 就绪需要同时满足两件事，`/health` 如实反映**：模型凭据（`OPENAI_API_KEY`，或下文的 ChatGPT OAuth 目录），以及 Codex 沙箱能真正启动。没有凭据是 `MODEL_API_KEY_NOT_CONFIGURED`，沙箱起不来是 `SANDBOX_UNAVAILABLE`（沙箱预检结果缓存 60 秒，不会联系模型）。
+- **主页的「Codex CLI 接入检查」**：超级管理员打开「工作台概览」会看到六项检查（执行器连接、Codex CLI 与版本、模型与端点、模型凭据、模型端点连通、沙箱）和一个总判断，其他角色看不到也不会发起请求。它通过 `GET /api/system/codex-status` 读取 runner 需要令牌的 `GET /status`；不改变 `/health`，所以模型服务商的临时故障不会让容器被判为不健康。模型端点连通检查只请求 `<端点>/models`（不产生模型调用、不消耗额度），不跟随重定向，结果缓存约 30 秒，「重新检查」最短每 5 秒刷新一次。页面和接口只会得到模型 id、端点主机名、版本号和状态码，不会返回 Key、完整地址或服务商的响应内容。端点不提供 `/models` 时显示「无法验证」，不算失败。升级时要同时更新 API 和 runner：旧 runner 没有 `/status`，页面会提示「执行器版本较旧」。
+- **第三方模型端点**：`CODEX_MODEL` 设模型 id，`CODEX_BASE_URL` 设 OpenAI 兼容的公网 https 地址（如 `https://models.example.com/v1`），并配 `OPENAI_API_KEY`、`CODEX_AUTH_MODE=api`。运行器会拒绝带账号/查询串/`..` 路径段的地址、非 443 端口、localhost、私网或保留地址；ChatGPT 登录模式下配置端点会直接报 `CODEX_BASE_URL_REQUIRES_API_MODE`，避免把登录令牌发给第三方。Key 只通过进程环境变量交给 Codex，不会写进 `config.toml`。模型 id 要与端点 `/models` 返回的完全一致（例如端点列的是 `gpt-6.1-sol`，写 `6.1-sol` 会得到 `model_not_found`）。
+- **Apple Silicon 上 amd64 的运行器无法启动 Codex 沙箱。** Docker Desktop 用 Rosetta 翻译 amd64 容器，Codex 为沙箱安装的 seccomp 过滤器是按 x86_64 编译的，arm64 内核拒绝它（`Invalid argument`），容器里没有任何办法绕过。同时 Docker 默认 seccomp 配置也拦截了沙箱需要的命名空间调用。因此默认栈里运行器会一直显示 `SANDBOX_UNAVAILABLE`。要让它在 Apple Silicon 上真正工作，显式启用原生 arm64 运行器（只有运行器改架构，其余服务仍是 amd64）：`docker compose --env-file .env.docker -f compose.yaml -f compose.runner-arm64.yaml up -d --build runner`。它会换上 `deploy/seccomp/runner.json`——Docker 官方默认配置加**一条**规则（放行 `clone`、`unshare`、`setns`、`mount`、`umount`、`umount2`、`pivot_root`、`sethostname`，由 `scripts/make_runner_seccomp.py` 生成，上游文件按 SHA-256 固定，改动上游必须先审核）。代价是运行器容器可以创建用户命名空间，内核攻击面比默认配置大；`cap_drop: ALL`、只读文件系统、`no-new-privileges`、网络隔离都不变。在 x86_64 的 Linux 主机上则不需要这个覆盖，只要放行同样的命名空间调用即可。
+- **让 arm64 选择对这个部署长期生效**：在本部署自己的 `.env.docker`（不进仓库）里加一行 `COMPOSE_FILE=compose.yaml:compose.runner-arm64.yaml`。否则以后有人执行不带 `-f` 的 `docker compose --env-file .env.docker up -d runner`，runner 会悄悄变回 amd64、沙箱检查重新失败。加了之后所有 `--env-file .env.docker` 的命令都自动带上覆盖；要回到 amd64，删掉这一行再重建 runner。`compose.yaml` 本身仍然默认 amd64。
+- **轮换模型 API Key**：先在模型服务商控制台生成新 Key，然后运行 `python3 scripts/rotate_model_key.py`（默认处理 `.env.docker`），在隐藏提示里粘贴新 Key——不要把 Key 写进命令行或贴到聊天里。脚本先用新 Key 请求端点的 `/models`（与 runner 一样直连，除非配置了 `CODEX_PROXY_URL`；不跟随重定向），模型在列表里才原子改写配置文件（权限 0600，其余行原样保留）；然后再用旧 Key 请求一次，确认服务商已拒绝它，最后只输出 HTTP 状态码。写完后执行 `docker compose --env-file .env.docker up -d --no-deps runner` 让 runner 用新 Key 重建。旧 Key 仍然有效时脚本以非零状态退出并提示去控制台吊销。
+- **附件解析在容器里默认失败关闭**：只有 macOS 能在系统层面禁止解析进程联网，容器不能，所以 `ATTACHMENT_ALLOW_PROCESS_ONLY` 默认为 0，上传的附件会得到「此平台尚未配置解析进程网络隔离」。设为 1 表示接受“仅进程级资源限制、没有网络隔离”，请先评估风险。
+- **飞书只允许同一应用有一个长连接**：`im` profile 的 `im-feishu` / `im-dingtalk` 容器不在默认启动列表里。如果本机已有直接运行的 IM 进程，不要同时启动它们，否则两边会各收到一部分消息。
+- **迁移数据必须带上同一个 `SESSION_SECRET`**（以及 `PLATFORM_AUTH_KEY`、`IM_CONFIG_KEY`，若设置过），否则库里加密保存的 IM 配置和个人授权无法解密。
+- `CODEX_PROXY_URL` 在容器里要写 `http://host.docker.internal:端口`；运行器会自动让 `PLATFORM_BRIDGE_URL`、`ATTACHMENT_BRIDGE_URL` 里的服务名（如 `api`）绕过代理。
+- 带出网网络的容器（api、attachments、runner）在 Docker Desktop 上能通过 `host.docker.internal` 访问宿主机本地服务，这是 Docker Desktop 的通用行为，不是本栈的配置；详见影响清单。
+
+默认仅监听本机（上面示例是 http://127.0.0.1:18210；直接运行为 http://127.0.0.1:18200）。在本机浏览器打开，填写「初始化管理员」的姓名、邮箱、至少 12 位密码与确认密码。第一个成功注册的账号成为启用的超级管理员，随后返回登录页。其余账号由管理员创建。
 
 首次初始化必须在仅本机可访问时完成。网页可继续只在内网管理；只有明确需要对外开放时才配置 HTTPS 反向代理与 APP_ORIGIN。空站开放公网后，任何首先注册的人都会取得管理员权限。默认 Docker 回环绑定应保持；远程部署可用 SSH 端口转发完成初始化。
 
@@ -222,7 +239,7 @@ services:
 测试需要独立 PostgreSQL 测试库；检查测试 fixture 的 DATABASE_URL 配置后运行。使用随机隔离 schema，不要指向业务库。
 
 ```bash
-PYTHONPATH=backend .venv/bin/python -m pytest backend/tests tests runner/test_runner.py -q
+PYTHONPATH=backend .venv/bin/python -m pytest backend/tests tests runner -q
 npm --prefix frontend test -- --run
 npm --prefix frontend run build
 ```

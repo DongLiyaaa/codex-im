@@ -150,7 +150,7 @@ def operate(db, run, name, args):
 
 
 @router.post('/internal/attachment-mcp')
-async def mcp(request: Request, db=Depends(get_db)):
+async def mcp(request: Request, db=Depends(get_db, scope='function')):
     run = verify(bearer(request), db)
     raw = bytearray()
     async for chunk in request.stream():
@@ -191,7 +191,7 @@ async def mcp(request: Request, db=Depends(get_db)):
 
 
 @router.get('/internal/attachment-images/{identifier}')
-def image(identifier: str, request: Request, db=Depends(get_db)):
+def image(identifier: str, request: Request, db=Depends(get_db, scope='function')):
     run = verify(bearer(request), db, IMAGE_AUDIENCE)
     item = bound(db, run, identifier)
     data = manifest(db, item)

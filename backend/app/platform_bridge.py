@@ -110,12 +110,12 @@ def verify(token, db):
 
 
 @router.get('/api/platform-connections')
-def connections(actor=Depends(current_user), db=Depends(get_db)):
+def connections(actor=Depends(current_user), db=Depends(get_db, scope='function')):
     return [platform_auth.operate(db, actor, p, private=True) for p in platform_auth.PROVIDERS]
 
 
 @router.post('/api/platform-connections/{provider}/{action}')
-def change(provider: str, action: str, actor=Depends(current_user), db=Depends(get_db)):
+def change(provider: str, action: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     if action not in ('start', 'refresh', 'cancel', 'disconnect'):
         raise HTTPException(404, 'Not found')
     if action == 'start':
@@ -125,7 +125,7 @@ def change(provider: str, action: str, actor=Depends(current_user), db=Depends(g
 
 
 @router.get('/api/integrations/oauth/{provider}')
-def oauth_config(provider: str, actor=Depends(current_user), db=Depends(get_db)):
+def oauth_config(provider: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     from . import policy, platform_settings
     policy.require(actor.active and actor.role == 'super_admin')
     return platform_settings.view(db, provider)
@@ -135,7 +135,7 @@ from .platform_settings import Update as OAuthUpdate, UseBotApp
 
 
 @router.post('/api/integrations/oauth/{provider}/use-bot-app')
-def oauth_use_bot(provider: str, body: UseBotApp, actor=Depends(current_user), db=Depends(get_db)):
+def oauth_use_bot(provider: str, body: UseBotApp, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     from . import policy, platform_settings
     from .service import audit
     policy.require(actor.active and actor.role == 'super_admin')
@@ -146,7 +146,7 @@ def oauth_use_bot(provider: str, body: UseBotApp, actor=Depends(current_user), d
 
 
 @router.put('/api/integrations/oauth/{provider}')
-def oauth_save(provider: str, body: OAuthUpdate, actor=Depends(current_user), db=Depends(get_db)):
+def oauth_save(provider: str, body: OAuthUpdate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     from . import policy, platform_settings
     from .service import audit
     policy.require(actor.active and actor.role == 'super_admin')
@@ -156,7 +156,7 @@ def oauth_save(provider: str, body: OAuthUpdate, actor=Depends(current_user), db
 
 
 @router.post('/internal/platform-mcp')
-async def mcp(request: Request, db=Depends(get_db)):
+async def mcp(request: Request, db=Depends(get_db, scope='function')):
     auth = request.headers.get('authorization', '')
     if not auth.startswith('Bearer ') or len(auth) > 2048:
         raise HTTPException(403, 'Invalid capability')

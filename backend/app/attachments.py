@@ -74,7 +74,7 @@ def run_attachments(db, run):
 
 
 @router.post('/api/conversations/{identifier}/attachments', status_code=201)
-async def upload(identifier: str, request: Request, actor=Depends(current_user), db=Depends(get_db)):
+async def upload(identifier: str, request: Request, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     conversation = db.get(Conversation, identifier)
     policy.require(conversation and policy.can_send_conversation(db, actor, conversation))
     # Bound the entire multipart body before the multipart parser can spool arbitrary input.
@@ -113,7 +113,7 @@ async def upload(identifier: str, request: Request, actor=Depends(current_user),
 
 
 @router.get('/api/conversations/{identifier}/attachments')
-def listing(identifier: str, actor=Depends(current_user), db=Depends(get_db)):
+def listing(identifier: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     conversation = db.get(Conversation, identifier)
     policy.require(conversation and policy.can_read_conversation(db, actor, conversation))
     rows = db.scalars(select(Attachment).where(Attachment.conversation_id == identifier,
@@ -125,7 +125,7 @@ def listing(identifier: str, actor=Depends(current_user), db=Depends(get_db)):
 
 
 @router.delete('/api/conversations/{identifier}/attachments/{attachment_id}')
-def remove(identifier: str, attachment_id: str, actor=Depends(current_user), db=Depends(get_db)):
+def remove(identifier: str, attachment_id: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     item = db.scalar(select(Attachment).where(Attachment.id == attachment_id).with_for_update())
     if not item or item.conversation_id != identifier:
         raise HTTPException(404, '附件不存在')
