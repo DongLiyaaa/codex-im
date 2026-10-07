@@ -75,7 +75,8 @@ def resource_out(resource, actor):
             config['headers'] = {key: '***' for key in config.get('headers', {})}
     elif resource.kind == 'skill':
         config = {'content': resource.config.get('content', '')}
-    return {key: getattr(resource, key) for key in ('id', 'name', 'kind', 'description', 'org_id', 'team_id', 'enabled')} | {'config': config}
+    return {key: getattr(resource, key) for key in ('id', 'name', 'kind', 'description', 'org_id', 'team_id', 'enabled')} | {
+        'config': config, 'can_manage': policy.can_manage_resource(actor, resource)}
 
 
 def lock_group(db, identifier):
@@ -96,7 +97,7 @@ def require_idle_group(db, identifier):
         raise HTTPException(409, '群组仍有待发送的回复，请完成后再修改或删除。')
     if db.scalar(select(IMReaction.event_id).join(IMEvent, IMEvent.id == IMReaction.event_id).where(
             IMEvent.run_id.in_(runs), IMReaction.state != 'cleared').limit(1)):
-        raise HTTPException(409, '群组飞书工作表情尚未清理，请完成后再修改或删除。')
+        raise HTTPException(409, '群组工作表情尚未清理，请完成后再修改或删除。')
 
 
 def lock_conversation(db, identifier):
@@ -120,7 +121,7 @@ def archive_conversation(db, actor, identifier):
     if db.scalar(select(IMReaction.event_id).join(IMEvent, IMEvent.id == IMReaction.event_id)
             .join(Run, Run.id == IMEvent.run_id).where(Run.conversation_id == identifier,
                 IMReaction.state != 'cleared').limit(1)):
-        raise HTTPException(409, '飞书工作表情尚未清理，请等待清理完成后再移除。')
+        raise HTTPException(409, '工作表情尚未清理，请等待清理完成后再移除。')
     conversation.archived_at, conversation.archived_by = now(), actor.id
     audit(db, actor, 'conversation.archive', identifier,
           {'group_id': conversation.group_id, 'owner_id': conversation.owner_id, 'history_retained': True})
@@ -210,6 +211,13 @@ def execute_run(run_id):
             if os.getenv('PLATFORM_BRIDGE_KEY'):
                 from .platform_bridge import issue
                 payload['platform_capability'] = issue(run)
+                from .platform_bridge import channel_of, CHANNEL_NAMES
+                channel = channel_of(db, run)
+                if channel:
+                    other = CHANNEL_NAMES['dingtalk' if channel == 'feishu' else 'feishu']
+                    payload['prompt'] += (f'\n\n[渠道说明] 当前消息来自{CHANNEL_NAMES[channel]}。内置云文档能力只提供{CHANNEL_NAMES[channel]}的'
+                                          f'{"文档、表格和多维表格" if channel == "feishu" else "文档和表格（不支持多维表格）"}；'
+                                          f'不要声称或提供{other}的任何能力，询问能力时只介绍{CHANNEL_NAMES[channel]}。')
             from .attachments import run_attachments
             from .attachment_models import AttachmentArtifact
             attached = run_attachments(db, run)

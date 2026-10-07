@@ -236,10 +236,10 @@ services:
 
 ## 测试
 
-测试需要独立 PostgreSQL 测试库；检查测试 fixture 的 DATABASE_URL 配置后运行。使用随机隔离 schema，不要指向业务库。
+测试需要独立 PostgreSQL 测试库；使用随机隔离 schema，不要指向业务库，也不要另起固定端口的 PG 容器。`scripts/test_backend.sh` 按 `compose.test.yaml` 临时起一个测试库（独立项目 `codex-hub-v1-test`、Docker 分配的空闲端口、tmpfs 无卷、amd64、1 CPU/512MB），跑完无论成败都删除；上次残留时直接报错，不复用也不覆盖。
 
 ```bash
-PYTHONPATH=backend .venv/bin/python -m pytest backend/tests tests runner -q
+PYTHON=.venv/bin/python scripts/test_backend.sh            # 默认 backend/tests tests runner，可传 pytest 参数
 npm --prefix frontend test -- --run
 npm --prefix frontend run build
 ```

@@ -55,3 +55,23 @@ def reveal_config(kind, config):
 
 def has_headers(kind, config):
     return bool(headers_of(kind, config))
+
+
+MASK = '***'
+
+
+def merge_config(kind, config, stored):
+    """The config of an edited resource, sealed. A header whose value is still the display mask keeps its stored secret."""
+    headers = headers_of(kind, config)
+    if not headers:
+        return config
+    previous = headers_of(kind, stored)
+    box = None
+    sealed = {}
+    for name, value in headers.items():
+        if value == MASK and name in previous:
+            sealed[name] = previous[name]
+            continue
+        box = box or cipher()
+        sealed[name] = PREFIX + box.encrypt(value.encode()).decode()
+    return {**config, 'headers': sealed}

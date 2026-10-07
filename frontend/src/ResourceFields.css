@@ -21,3 +21,6 @@
 .resource-detail dd{margin:0;overflow-wrap:anywhere;color:#3d556b}
 .resource-detail pre.skill-body{white-space:pre-wrap;overflow-wrap:anywhere;font-family:inherit;font-size:12px;line-height:1.7;max-height:260px;overflow:auto;background:#f6f8fa;border-radius:8px;padding:12px;margin:8px 0 0}
 @media(max-width:700px){.header-row{grid-template-columns:minmax(0,1fr) auto auto}.header-row label:first-child,.header-row label:nth-child(2){grid-column:1 / -1}}
+.resource-grants{font-size:12px;line-height:1.6;color:#2a8a68;margin:8px 0 0;overflow-wrap:anywhere}
+.resource-grants.warning{color:#a5651c}
+.resource-grants .link-button{border:0;background:none;padding:0 0 0 6px;color:var(--teal);font:inherit;cursor:pointer;text-decoration:underline}

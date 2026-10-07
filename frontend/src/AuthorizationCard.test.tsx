@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest';
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react';
 import { AuthorizationCard } from './AuthorizationCard';
 import { OAuthConfig } from './OAuthConfig';
+import { Toaster } from 'sonner';
 const { request } = vi.hoisted(() => ({ request: vi.fn() }));
 vi.mock('./api', async original => ({ ...await original<typeof import('./api')>(), api: request }));
 afterEach(() => {cleanup();request.mockReset();vi.useRealTimers();});
@@ -76,5 +77,45 @@ it('starts and refreshes using existing personal endpoints', async () => {
 it('shows honest setup required and configuration fetch error',async()=>{
  request.mockResolvedValue({provider:'feishu',revision:0,configured:false,message:'独立配置',fields:{CLIENT_ID:'',SCOPES:'docx:document:readonly'},secrets_set:{CLIENT_SECRET:false}});
  render(<OAuthConfig provider="feishu"/>);await screen.findByText('需要管理员配置：缺少个人 OAuth 应用配置');cleanup();
- request.mockRejectedValue(new Error('配置读取失败'));render(<OAuthConfig provider="feishu"/>);await screen.findByRole('alert');expect(screen.getByText('配置读取失败')).toBeTruthy();
+ request.mockRejectedValue(new Error('配置读取失败'));render(<OAuthConfig provider="feishu"/>);await screen.findAllByRole('alert');expect(screen.getAllByText('配置读取失败').length).toBeGreaterThan(0);
+});
+it('keeps the personal authorization people list in Hub and shows who each person is', async () => {
+ const people = [
+  {id:'u1',name:'冬离',role:'member',active:true,email:null,organization:'公司',department:'运营',account:'326850072533581332',authorization:'identity_unverified'},
+  {id:'u2',name:'蓝海明',role:'member',active:true,email:null,organization:'公司',department:'运营',account:null,authorization:null},
+  {id:'u3',name:'管理员',role:'super_admin',active:true,email:'root@example.com',organization:null,department:null,account:null,authorization:null},
+  {id:'u4',name:'外部成员',role:'member',active:true,email:null,organization:'11',department:null,account:'9001',authorization:null}];
+ const responses: Record<string, unknown> = {
+  '/integrations/oauth/dingtalk': {provider:'dingtalk',revision:1,configured:true,message:'已配置',fields:{CLIENT_ID:'cli',SCOPES:''},secrets_set:{CLIENT_SECRET:true}},
+  '/integrations/oauth/dingtalk/access': {provider:'dingtalk',revision:0,user_scope:'all',user_ids:[],people}};
+ request.mockImplementation(async (path: string, init?: RequestInit) => init?.method === 'PUT' ? {provider:'dingtalk',revision:1,user_scope:'specified',user_ids:['u1'],people} : responses[path]);
+ HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+ render(<><Toaster/><OAuthConfig provider="dingtalk"/></>);
+ // Everyone mode lists who can actually authorize now: the people with a bound DingTalk account.
+ await screen.findByText('全员可用：已绑定本人钉钉账号的成员都可以发起本人授权，当前 2 人。');
+ const table = screen.getByRole('table');
+ expect(table.textContent).toContain('冬离');expect(table.textContent).toContain('公司 / 运营');expect(table.textContent).toContain('326850072533581332');expect(table.textContent).toContain('无法核验本人身份');
+ expect(table.textContent).toContain('11 / 组织级');expect(table.textContent).not.toContain('蓝海明');
+ expect(screen.getByText(/可用人员设置请选「全员可用」/)).toBeTruthy();
+ fireEvent.click(screen.getByText('设置可用人员'));
+ fireEvent.click(screen.getByLabelText('指定人员范围可用'));
+ fireEvent.click(screen.getByText('保存可用人员')); await screen.findByText('请至少选择一位成员，或改为全员可用。');
+ const dialog = within(screen.getByRole('dialog'));
+ expect(dialog.getAllByText('未绑定钉钉账号，绑定后才能发起本人授权 · 本人授权：未发起')).toHaveLength(2);
+ expect(dialog.getByText('全局（不属于组织） · root@example.com')).toBeTruthy();
+ fireEvent.change(dialog.getByLabelText('按组织筛选'), {target:{value:'11'}});
+ expect(dialog.queryByText('冬离')).toBeNull();
+ fireEvent.change(dialog.getByLabelText('按组织筛选'), {target:{value:''}});
+ fireEvent.click(dialog.getByLabelText('只看已绑定钉钉账号'));
+ expect(dialog.queryByText('蓝海明')).toBeNull();
+ fireEvent.change(dialog.getByLabelText('搜索成员'), {target:{value:'运营'}});
+ fireEvent.click(dialog.getByText('选中筛选结果（1）'));
+ expect(dialog.getByLabelText('选择 冬离（公司 / 运营）')).toHaveProperty('checked', true);
+ responses['/integrations/oauth/dingtalk/access'] = {provider:'dingtalk',revision:1,user_scope:'specified',user_ids:['u1'],people};
+ fireEvent.click(screen.getByText('保存可用人员'));
+ await screen.findByText('指定人员范围可用：以下 1 人可以发起本人钉钉授权。');
+ expect(screen.getByRole('table').textContent).toContain('公司 / 运营');
+ const put = request.mock.calls.find(([, init]) => init?.method === 'PUT')!;
+ expect(put[0]).toBe('/integrations/oauth/dingtalk/access');
+ expect(JSON.parse(put[1].body)).toEqual({revision:0,user_scope:'specified',user_ids:['u1']});
 });

@@ -20,14 +20,14 @@ function serveUsers(people: User[]) {
 }
 const renderUsers = () => render(<><Toaster/><Management page="users" user={root} navigate={vi.fn()}/></>);
 
-it('offers stop and rename only for people the administrator manages', async () => {
+it('offers stop and edit only for people the administrator manages', async () => {
   serveUsers([person({}), person({ id: 'u2', name: '已停用同事', active: false }), person({ id: 'root', name: 'Root', can_manage: false })]);
   renderUsers();
   await screen.findByText('王小明');
-  expect(screen.getAllByText('改名').length).toBe(2);
+  expect(screen.getAllByText('编辑').length).toBe(2);
   expect(screen.getByText('停用')).toBeTruthy();
   expect(screen.getByText('启用')).toBeTruthy();
-  expect(within(screen.getByText('Root').closest('tr')!).queryByText('改名')).toBeNull();
+  expect(within(screen.getByText('Root').closest('tr')!).queryByText('编辑')).toBeNull();
 });
 
 it('stops a person only after the consequences are confirmed, and explains them', async () => {
@@ -69,13 +69,29 @@ it('shows the server refusal instead of pretending a change happened', async () 
 it('renames a member through the dialog', async () => {
   serveUsers([person({})]);
   renderUsers();
-  fireEvent.click(await screen.findByText('改名'));
+  fireEvent.click(await screen.findByText('编辑'));
   const input = await screen.findByLabelText('姓名') as HTMLInputElement;
   expect(input.value).toBe('王小明');
   fireEvent.change(input, { target: { value: '王小明（广告）' } });
   fireEvent.click(screen.getByText('保存'));
   await waitFor(() => expect(request).toHaveBeenCalledWith('/users/u1', { method: 'PATCH', body: JSON.stringify({ name: '王小明（广告）' }) }));
   expect(await screen.findByText('姓名已更新。')).toBeTruthy();
+});
+
+it('moves a member to another role and department, and sends the placement only when it changed', async () => {
+  const twoTeams = { ...directory, departments: [...directory.departments, { id: 'ops', org_id: 'org', name: '运营' }] };
+  request.mockImplementation(async (path: string, options?: RequestInit) => options?.method === 'PATCH' ? { ok: true } : path === '/users' ? [person({})] : path === '/directory' ? twoTeams : []);
+  renderUsers();
+  fireEvent.click(await screen.findByText('编辑'));
+  expect(Array.from((screen.getByLabelText('角色') as HTMLSelectElement).options).map(o => o.textContent)).toEqual(['组织管理员', '团队负责人', '成员']);
+  await screen.findByRole('option', { name: '运营' });
+  expect(screen.queryByText(/保存后立即生效/)).toBeNull();
+  fireEvent.change(screen.getByLabelText('角色'), { target: { value: 'team_lead' } });
+  fireEvent.change(screen.getByLabelText('部门'), { target: { value: 'ops' } });
+  expect(screen.getByText(/超出新范围的个人授权会被撤销/)).toBeTruthy();
+  fireEvent.click(screen.getByText('保存'));
+  await waitFor(() => expect(request).toHaveBeenCalledWith('/users/u1', { method: 'PATCH', body: JSON.stringify({ name: '王小明', role: 'team_lead', org_id: 'org', team_id: 'ops' }) }));
+  expect(await screen.findByText('已保存，角色与组织 / 部门立即生效。')).toBeTruthy();
 });
 
 const found = (id: string, overrides: Record<string, unknown> = {}) => ({ id, provider: 'feishu', sender_id: 'ou_' + id, chat_id: 'oc_' + id, chat_type: 'p2p', nickname: null, nickname_status: 'not_resolved', chat_name: null, chat_name_status: 'private_chat', first_seen: '2026-10-04T00:00:00Z', last_seen: '2026-10-04T00:00:00Z', reason: 'unknown_sender', current_reason: 'unknown_sender', status: 'pending', user_id: null, ...overrides });

@@ -6,8 +6,8 @@ from .models import IMReaction, Organization, Department
 def migrate(engine):
     with engine.begin() as conn:
         conn.execute(select(func.pg_advisory_xact_lock(71904)))
-        from .models import PlatformSettings, PlatformAuthJob, PlatformAuthRequest, IMChatName, IMOutbox, PlatformApproval, IMOnboardingPolicy, ResourceDepartment
-        for model in (PlatformSettings, PlatformAuthJob, PlatformAuthRequest, IMChatName, IMOutbox, PlatformApproval, IMOnboardingPolicy, ResourceDepartment):
+        from .models import PlatformSettings, PlatformAuthJob, PlatformAuthRequest, IMChatName, IMOutbox, PlatformApproval, IMOnboardingPolicy, ResourceDepartment, PlatformAccess
+        for model in (PlatformSettings, PlatformAuthJob, PlatformAuthRequest, IMChatName, IMOutbox, PlatformApproval, IMOnboardingPolicy, ResourceDepartment, PlatformAccess):
             model.__table__.create(conn, checkfirst=True)
         IMReaction.__table__.create(conn, checkfirst=True)
         Organization.__table__.create(conn, checkfirst=True)
@@ -18,6 +18,7 @@ def migrate(engine):
         conn.execute(text('ALTER TABLE departments ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ'))
         conn.execute(text('ALTER TABLE groups ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ'))
         conn.execute(text('ALTER TABLE groups ADD COLUMN IF NOT EXISTS archived_by VARCHAR(36)'))
+        conn.execute(text('ALTER TABLE identities ADD COLUMN IF NOT EXISTS corp_id VARCHAR(200)'))
         conn.execute(text('ALTER TABLE groups DROP CONSTRAINT IF EXISTS groups_provider_external_id_key'))
         conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_groups_active_external '
                           'ON groups (provider, external_id) WHERE archived_at IS NULL'))

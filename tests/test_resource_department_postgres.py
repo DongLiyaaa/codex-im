@@ -166,3 +166,152 @@ def test_the_runner_receives_decrypted_headers_and_only_the_resources_in_scope(d
         payload = service.build_payload(db, db.scalar(select(Run)))
         assert payload['mcps'] == [{'name': connected.id, 'url': 'https://mcp.example.com/mcp', 'headers': plain}]
         assert payload['skills'] == []  # the group has no department, so the department's Skill stays out
+
+
+def update(db, actor, resource, **values):
+    current = {'name': resource.name, 'description': resource.description, 'org_id': resource.org_id, 'team_id': resource.team_id,
+               'enabled': resource.enabled, 'config': dict(resource.config)}
+    return main.update_resource(resource.id, schemas.ResourceUpdate(**{**current, **values}), actor, db)
+
+
+def test_update_changes_scope_and_revokes_grants_outside_it(database):
+    with database.begin() as db:
+        root, org, ops, finance = company(db)
+        member = person(db, 'ops-member', 'member', org, ops)
+        other = person(db, 'fin-member', 'member', org, finance)
+        resource = create(db, root, org_id=org)
+        grant(db, 'user', member, resource)
+        grant(db, 'user', other, resource)
+        result = update(db, root, resource, name='renamed', team_id=ops)
+        assert result['name'] == 'renamed' and result['team_id'] == ops
+        left = {b.subject_id for b in db.scalars(select(Binding).where(Binding.resource_id == resource.id))}
+        assert left == {member.id}
+
+
+def test_update_rejects_other_organizations_and_members(database):
+    with database.begin() as db:
+        root, org, ops, _ = company(db)
+        boss = person(db, 'boss', 'org_admin', org)
+        resource = create(db, root, org_id=org)
+        with pytest.raises(HTTPException) as moved:
+            update(db, boss, resource, org_id=None)
+        assert moved.value.status_code == 403
+        member = person(db, 'plain', 'member', org, ops)
+        with pytest.raises(HTTPException) as denied:
+            update(db, member, resource, name='x')
+        assert denied.value.status_code == 403
+
+
+def test_update_keeps_masked_mcp_header_and_replaces_new_ones(database):
+    with database.begin() as db:
+        root, org, _, _ = company(db)
+        resource = create(db, root, kind='mcp', org_id=org, config={'url': 'https://mcp.example.com/mcp', 'headers': {'Authorization': 'Bearer one'}})
+        stored = resource.config['headers']['Authorization']
+        update(db, root, resource, config={'url': 'https://mcp.example.com/mcp', 'headers': {'Authorization': '***', 'X-Key': 'two'}})
+        headers = db.get(Resource, resource.id).config['headers']
+        assert headers['Authorization'] == stored and headers['X-Key'].startswith('enc1:')
+
+
+def test_delete_removes_resource_and_grants(database):
+    with database.begin() as db:
+        root, org, ops, _ = company(db)
+        member = person(db, 'm', 'member', org, ops)
+        resource = create(db, root, org_id=org)
+        grant(db, 'user', member, resource)
+        rid = resource.id
+        with pytest.raises(HTTPException):
+            main.delete_resource(rid, member, db)
+        assert main.delete_resource(rid, root, db) == {'ok': True}
+        db.expire_all()
+        assert db.get(Resource, rid) is None
+        assert db.scalar(select(Binding).where(Binding.resource_id == rid)) is None
+
+
+def test_department_and_organization_grants_reach_their_members_and_groups(database):
+    with database.begin() as db:
+        root, org, ops, finance = company(db)
+        in_ops, in_finance = person(db, 'ops', 'member', org, ops), person(db, 'fin', 'member', org, finance)
+        department_only = create(db, root, name='运营专用', org_id=org, team_id=ops, grant_scope=True)
+        whole_org = create(db, root, name='全组织', org_id=org, grant_scope=True)
+        assert {(b.subject_type, b.subject_id) for b in db.scalars(select(Binding))} == {('team', ops), ('org', org)}
+        assert {r.name for r in main.visible_resources(db, in_ops)} == {'运营专用', '全组织'}
+        assert {r.name for r in main.visible_resources(db, in_finance)} == {'全组织'}
+        assert {r.name for r in policy.effective_resources(db, in_ops, conversation(db, in_ops))} == {'运营专用', '全组织'}
+        # A group chat still needs the group side too; a department group gets the department's grants.
+        ops_group = Group(name='运营群', org_id=org, team_id=ops, member_ids=[in_ops.id], provider='feishu', external_id='ops-chat')
+        db.add(ops_group)
+        db.flush()
+        assert {r.name for r in policy.effective_resources(db, in_ops, conversation(db, in_ops, ops_group))} == {'运营专用', '全组织'}
+        # The listing tells administrators who has it; members only see their own grants.
+        listed = {r['name']: r for r in main.resources(root, db)}
+        assert listed['运营专用']['grants'] == [{'subject_type': 'team', 'subject_id': ops}]
+        assert {(b.subject_type, b.subject_id) for b in main.bindings(in_finance, db)} == {('org', org)}
+
+
+def test_granting_the_scope_is_explicit_and_checked(database):
+    with database.begin() as db:
+        root, org, ops, finance = company(db)
+        silent = create(db, root, name='未授权', org_id=org, team_id=ops)
+        assert main.managed_out(db, silent, root)['grants'] == []
+        with pytest.raises(HTTPException) as global_scope:
+            create(db, root, name='全局', grant_scope=True)
+        assert global_scope.value.status_code == 400
+        lead = person(db, 'lead', 'team_lead', org, ops)
+        with pytest.raises(HTTPException) as denied:  # a team lead may not grant a whole department
+            main.grant_to_scope(db, lead, silent)
+        assert denied.value.status_code == 403
+        update(db, root, silent, grant_scope=True)
+        update(db, root, silent, grant_scope=True)  # granting twice adds nothing
+        assert [(b.subject_type, b.subject_id) for b in db.scalars(select(Binding).where(Binding.resource_id == silent.id))] == [('team', ops)]
+        # Moving the resource to another department drops the old department's grant.
+        update(db, root, silent, team_id=finance)
+        assert db.scalars(select(Binding).where(Binding.resource_id == silent.id)).all() == []
+        assert not policy.can_manage_binding(db, root, Binding(subject_type='org', subject_id=org, resource_id=silent.id))
+
+
+def test_moving_a_member_changes_what_they_get_and_cleans_up_behind_them(database):
+    from app import user_lifecycle
+    with database.begin() as db:
+        root, org, ops, finance = company(db)
+        member, colleague = person(db, 'mover', 'member', org, ops), person(db, 'stay', 'member', org, ops)
+        ops_group = Group(name='运营群', org_id=org, team_id=ops, member_ids=[member.id, colleague.id], provider='feishu', external_id='ops-chat')
+        wide_group = Group(name='全公司群', org_id=org, team_id=None, member_ids=[member.id, colleague.id], provider='feishu', external_id='wide-chat')
+        db.add_all([ops_group, wide_group])
+        db.flush()
+        ops_skill = create(db, root, name='运营专用', org_id=org, team_id=ops, grant_scope=True)
+        personal = create(db, root, name='个人', org_id=org, team_id=ops)
+        grant(db, 'user', member, personal)
+        finance_skill = create(db, root, name='财务专用', org_id=org, team_id=finance, grant_scope=True)
+        assert {r.name for r in main.visible_resources(db, member)} == {'运营专用', '个人'}
+        main.update_user(member.id, schemas.UserUpdate(role='team_lead', org_id=org, team_id=finance), root, db)
+        assert (member.role, member.team_id) == ('team_lead', finance)
+        assert {r.name for r in main.visible_resources(db, member)} == {'财务专用'}
+        assert db.scalars(select(Binding).where(Binding.subject_type == 'user', Binding.subject_id == member.id)).all() == []
+        assert member.id not in ops_group.member_ids and member.id in wide_group.member_ids
+        audit = db.scalars(select(service.Audit).where(service.Audit.action == 'user.place')).one()
+        assert audit.details['left_groups'] == [ops_group.id] and len(audit.details['revoked_bindings']) == 1
+
+
+def test_who_may_change_a_members_role_or_department(database):
+    with database.begin() as db:
+        root, org, ops, finance = company(db)
+        admin = person(db, 'admin', 'org_admin', org)
+        lead = person(db, 'lead', 'team_lead', org, ops)
+        member = person(db, 'm', 'member', org, ops)
+        main.update_user(member.id, schemas.UserUpdate(role='member', org_id=org, team_id=finance), admin, db)
+        assert member.team_id == finance
+        for actor, change in ((admin, dict(role='org_admin', org_id=org, team_id=None)),  # not to their own rank
+                              (lead, dict(role='member', org_id=org, team_id=ops))):  # the lead no longer manages them
+            with pytest.raises(HTTPException) as denied:
+                main.update_user(member.id, schemas.UserUpdate(**change), actor, db)
+            assert denied.value.status_code == 403
+        with pytest.raises(ValueError):  # role, organization and department travel together
+            schemas.UserUpdate(role='member')
+        with pytest.raises(ValueError):
+            schemas.UserUpdate(role='member', org_id=org, team_id=None)
+        alone = Group(name='独群', org_id=org, team_id=finance, member_ids=[member.id], provider='feishu', external_id='alone')
+        db.add(alone)
+        db.flush()
+        with pytest.raises(HTTPException) as sole:
+            main.update_user(member.id, schemas.UserUpdate(role='member', org_id=org, team_id=ops), root, db)
+        assert sole.value.status_code == 409

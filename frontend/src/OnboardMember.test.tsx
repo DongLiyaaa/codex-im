@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { DiscoveryPanel, Management } from './Management';
-import { contact } from './api';
+import { contact, channelLabel } from './api';
 import type { Group, User } from './api';
 const { request, notify } = vi.hoisted(() => ({ request: vi.fn(), notify: vi.fn() }));
 vi.mock('./api', async original => ({ ...await original<typeof import('./api')>(), api: request, post: (path: string, body: unknown) => request(path, body) }));
@@ -68,8 +68,17 @@ it('shows a failure and keeps the dialog open so nothing is silently lost', asyn
   expect((screen.getByLabelText('姓名') as HTMLInputElement).value).toBe('小王');
 });
 
+it('a connected sender shows its live state instead of the stale discovery reason', async () => {
+  serve([found({ user_id: 'u1', status: 'authorized', current_reason: null, reason: 'unknown_sender' })]);
+  render(<DiscoveryPanel kind="private" users={[]} groups={[]} reloadMappings={() => {}}/>);
+  expect(await screen.findByText('已接入')).toBeTruthy();
+  expect(screen.getByText('无需处理')).toBeTruthy();
+  expect(screen.queryByText('发送者尚未绑定')).toBeNull();
+  expect(screen.queryByText('处理接入')).toBeNull();
+});
+
 it('a sender that is already bound can only continue with the existing-user form', async () => {
-  serve([found({ user_id: 'u1', status: 'authorized', current_reason: null })]);
+  serve([found({ user_id: 'u1', status: 'pending', current_reason: 'inactive_user' })]);
   render(<DiscoveryPanel kind="private" users={[{ id: 'u1', name: '已有员工', email: 'staff@example.invalid', role: 'member', org_id: 'org', team_id: 'dept', active: true }]} groups={[]} reloadMappings={() => {}}/>);
   fireEvent.click(await screen.findByText('处理接入'));
   expect((await screen.findByLabelText('接入方式') as HTMLSelectElement).value).toBe('existing');
@@ -165,4 +174,10 @@ it('treats users without the flag as normal accounts', () => {
   expect(contact(base)).toBe('x@example.invalid');
   expect(contact({ ...base, login_enabled: true })).toBe('x@example.invalid');
   expect(contact({ ...base, login_enabled: false })).toBe('仅 IM 接入');
+});
+
+it('labels the IM channels a user is bound to', () => {
+  const base = { id: 'x', name: 'x', email: 'x@example.invalid', role: 'member', org_id: null, team_id: null, active: true } as const;
+  expect(channelLabel(base)).toBe('');
+  expect(channelLabel({ ...base, im_channels: ['dingtalk', 'feishu'] })).toBe('钉钉、飞书');
 });

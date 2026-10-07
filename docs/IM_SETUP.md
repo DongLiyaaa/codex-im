@@ -186,7 +186,7 @@ legacy 回调仍为 `/api/im/feishu/callback`、`/api/im/dingtalk/callback`，�
 
 独立表通过 `app.im_migrations.migrate` 在 API 启动时执行幂等增量建表，不为现有表加列。需先更新 API 再更新 IM 接收进程。事件和标记在同一事务提交；网络在提交后执行。进程间 advisory lock 串行化同一 Run，配置共享锁阻止请求期间替换应用配置；不同应用 scope 不操作旧消息。失败、中断、取消的终态由 worker 每轮检查，清理失败间隔至少30秒重试。创建超时或崩溃时，读取消息上当前应用自己的 Typing 标记再删除，绝不删除用户或其他应用表情；成功清理后删除原始 message_id 和 reaction_id。网络或权限失败不会阻止正常生成/回复，但飞书不可达、权限被撤销或应用已切换时无法保证远端标记立即消失，状态会保留待清理错误，需恢复原应用及权限。仅安装代码不等于真实平台验收。
 
-钉钉的消息表情：我们此前写的“官方目录未证实存在该接口”并不准确。开源项目 cc-connect 的钉钉适配调用了 `POST /v1.0/robot/emotion/reply` 与 `/v1.0/robot/emotion/recall`（参数 `robotCode`、`openMsgId`、`openConversationId`、`emotionType=2`、`textEmotion`），即回复和撤回用户消息上的表情，说明接口存在。本版尚未实现：当前没有配置钉钉应用，无法做真实验证，且文本表情用到的模板 ID 是它写死的常量，需要在真实应用上确认后再接入。交互卡片（钉钉 AI 卡片流式更新）可作为后续方案，但需要另行确定权限、卡片模板和交互，不自动追加永久工作文本。
+钉钉的消息表情（仅 Stream 长连接模式）：与飞书同一套 `im_reactions` 发件箱。新授权消息入库时记下原始 `msgId`，worker 在调用 Codex 前请求 `POST https://api.dingtalk.com/v1.0/robot/emotion/reply`，在用户那条消息上加「🤔思考中」文本表情，发送正文回复前请求 `/v1.0/robot/emotion/recall` 撤回（参数 `robotCode`、`openMsgId`、`openConversationId`、`emotionType=2`、`textEmotion`，应用 access token 放在 `x-acs-dingtalk-access-token`）。接口与参数取自开源钉钉适配器的实现；已在 DD机器 应用上用现有机器人发送权限实测一次添加与撤回，均返回 HTTP 200 `success:true`，无需额外开通权限。钉钉没有 reaction_id，撤回无需 ID，可重复调用；超时或崩溃后由 30 秒一次的恢复任务补撤回。钉钉明确拒绝（403 权限不足、其他 4xx、`success:false`）时不再重试，状态记为已清理并保留错误码（`PERMISSION_REQUIRED` / `REACTION_API_FAILED`）；429、5xx、超时会继续重试。Webhook 模式没有可回复的机器人消息接口，不加表情。表情是尽力而为的提示，失败不会阻止正常回复。管理员 `/api/integrations/status` 的钉钉 `native_work_status` 显示最近一次结果。交互卡片（钉钉 AI 卡片流式更新）仍是后续方案，需要另行确定权限、卡片模板和交互。
 
 参考：[飞书创建表情回复](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/create)、[飞书删除表情回复](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/delete)。
 
