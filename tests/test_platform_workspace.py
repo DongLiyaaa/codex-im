@@ -72,9 +72,12 @@ if args[:2] == ['drive', '+delete']:
 if args[:2] == ['auth', 'login']:
     ok({{'success': True}})
 if args[:2] == ['doc', '+create']:
-    ok({{'success': True, 'data': {{'dentryUuid': 'DD123456', 'url': 'https://alidocs.dingtalk.com/i/nodes/DD123456'}}}})
+    # dws v1.0.62 (contract doc.operation.v1): the link is docUrl, not url, and the id is nodeId.
+    link = {{}} if 'nolink' in mode else {{'docUrl': 'https://alidocs.dingtalk.com/i/nodes/DD123456'}}
+    ok({{'ok': True, 'operation': 'doc.create', 'status': 'success', 'data': {{'nodeId': 'DD123456', 'result': {{'nodeId': 'DD123456', 'name': '纪要', 'success': True, **link}}}}}})
 if args[:2] == ['sheet', 'create-with-data'] or args[:2] == ['sheet', 'create']:
-    ok({{'success': True, 'data': {{'workbookId': 'WB123456', 'url': 'https://alidocs.dingtalk.com/i/nodes/WB123456'}}}})
+    link = {{}} if 'nolink' in mode else {{'docUrl': 'https://alidocs.dingtalk.com/i/nodes/WB123456'}}
+    ok({{'ok': True, 'data': {{'nodeId': 'WB123456', 'sheetId': 'sheet0001', **link}}}})
 if 'notfound' in mode:
     fail('document not found')
 if args[:2] == ['docs', '+fetch']:
@@ -130,8 +133,8 @@ def client_for(database):
     return TestClient(main.app), main
 
 
-def token_for(database, group=False):
-    run_id, user_id = im_run(database, group=group)
+def token_for(database, group=False, provider='feishu'):
+    run_id, user_id = im_run(database, group=group, provider=provider)
     with database.begin() as db:
         return bridge.issue(db.get(Run, run_id)), run_id, user_id
 
@@ -245,7 +248,7 @@ def test_platform_errors_and_foreign_links_never_reach_model(database, monkeypat
 def test_dingtalk_requires_personal_authorization_then_runs_dws_as_user(database, monkeypatch, fake_cli):
     configure(monkeypatch)
     _, calls = fake_cli
-    token, run_id, user_id = token_for(database)
+    token, run_id, user_id = token_for(database, provider='dingtalk')
     client, main = client_for(database)
     try:
         result = body(invoke(client, token, 'create_platform_document', {'provider': 'dingtalk', 'title': '纪要'}))
@@ -265,6 +268,34 @@ def test_dingtalk_requires_personal_authorization_then_runs_dws_as_user(database
     assert login['args'][:4] == ['auth', 'login', '--token', MOCK_USER] and login['home'] == create['home']
     assert create['env']['DWS_DISABLE_KEYCHAIN'] == '1' and create['env']['DWS_CONFIG_DIR'].startswith(create['home'])
     assert create['stdin'] == '正文' and MOCK_USER not in json.dumps(doc)
+
+
+def test_dingtalk_link_is_found_in_the_real_dws_shape_or_built_from_the_node_id(database, monkeypatch, fake_cli):
+    configure(monkeypatch)
+    token, run_id, user_id = token_for(database, provider='dingtalk')
+    client, main = client_for(database)
+    try:
+        with database.begin() as db:
+            db.add(PlatformConnection(user_id=user_id, provider='dingtalk', state='connected',
+                                      encrypted=pa.seal({'access_token': MOCK_USER}), expires_at=now() + timedelta(minutes=30)))
+        fake_cli[0].write_text('nolink')
+        doc = body(invoke(client, token, 'create_platform_document', {'provider': 'dingtalk', 'title': '纪要'}))
+        sheet = body(invoke(client, token, 'create_platform_spreadsheet', {'provider': 'dingtalk', 'title': '表', 'values': [['a']]}))
+    finally:
+        main.app.dependency_overrides.clear()
+    assert doc['url'] == 'https://alidocs.dingtalk.com/i/nodes/DD123456'
+    assert sheet['url'] == 'https://alidocs.dingtalk.com/i/nodes/WB123456'
+
+
+def test_extract_accepts_docurl_but_never_invents_a_feishu_link_or_trusts_foreign_hosts():
+    from app import platform_workspace as w
+    node = 'https://alidocs.dingtalk.com/i/nodes/ABCDEFGH1234'
+    assert w.extract('dingtalk', {'data': {'result': {'docUrl': node, 'nodeId': 'ABCDEFGH1234'}}}) == (node, 'ABCDEFGH1234')
+    assert w.extract('dingtalk', {'data': {'nodeId': 'ABCDEFGH1234'}}) == (node, 'ABCDEFGH1234')
+    assert w.extract('dingtalk', {'data': {'docUrl': 'https://evil.example/x', 'nodeId': 'ABCDEFGH1234'}}) == (node, 'ABCDEFGH1234')
+    assert w.extract('dingtalk', {'data': {'nodeId': 'bad id/../x'}}) == (None, 'bad id/../x')
+    assert w.extract('feishu', {'data': {'document_id': 'ABCDEFGH1234'}}) == (None, 'ABCDEFGH1234')
+    assert w.extract('feishu', {'data': {'docUrl': 'https://evil.example/x'}}) == (None, None)
 
 
 @pytest.mark.parametrize('args', [
@@ -464,10 +495,10 @@ def test_dingtalk_read_write_private_only(database, monkeypatch, fake_cli):
     configure(monkeypatch)
     _, calls = fake_cli
     node = 'https://alidocs.dingtalk.com/i/nodes/NODE00001'
-    group_token, _, user_id = token_for(database, group=True)
+    group_token, _, user_id = token_for(database, group=True, provider='dingtalk')
     connect(database, user_id, provider='dingtalk', scope=None)
     assert body(run_tools(database, group_token, ('read_platform_resource', {'provider': 'dingtalk', 'kind': 'document', 'url': node}))[0])['state'] == 'private_chat_required'
-    token, run_id, private_user = token_for(database, group=False)
+    token, run_id, private_user = token_for(database, group=False, provider='dingtalk')
     connect(database, private_user, provider='dingtalk', scope=None)
     read, doc, sheet = run_tools(database, token,
         ('read_platform_resource', {'provider': 'dingtalk', 'kind': 'document', 'url': node}),
@@ -628,11 +659,11 @@ def test_dingtalk_command_private_only_with_confirmation(database, monkeypatch, 
     configure(monkeypatch)
     _, calls = fake_cli
     node = 'https://alidocs.dingtalk.com/i/nodes/NODE00001'
-    group_token, _, user_id = token_for(database, group=True)
+    group_token, _, user_id = token_for(database, group=True, provider='dingtalk')
     connect(database, user_id, provider='dingtalk', scope=None)
     fetch = {'provider': 'dingtalk', 'command': ['doc', '+fetch'], 'flags': {'node': node}}
     assert body(run_tools(database, group_token, ('run_platform_command', fetch))[0])['state'] == 'private_chat_required'
-    token, run_id, private_user = token_for(database, group=False)
+    token, run_id, private_user = token_for(database, group=False, provider='dingtalk')
     connect(database, private_user, provider='dingtalk', scope=None)
     delete = {'provider': 'dingtalk', 'command': ['doc', 'block', 'delete'], 'flags': {'node': node, 'block-id': 'b1'}}
     results = run_tools(database, token,
@@ -647,3 +678,41 @@ def test_dingtalk_command_private_only_with_confirmation(database, monkeypatch, 
     fetched, deleted = executed(calls)
     assert fetched[:2] == ['doc', '+fetch'] and fetched[-2:] == ['-f', 'json'] and '--as' not in fetched
     assert '--yes' in deleted
+
+
+def listed_tools(client, token):
+    response = client.post('/internal/platform-mcp', headers={'Authorization': 'Bearer ' + token},
+                           json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})
+    return {tool['name']: tool for tool in response.json()['result']['tools']}
+
+
+def test_dingtalk_channel_only_offers_dingtalk_capabilities(database, monkeypatch, fake_cli):
+    configure(monkeypatch)
+    token, _, _ = token_for(database, provider='dingtalk')
+    client, main = client_for(database)
+    try:
+        tools = listed_tools(client, token)
+        blocked = body(invoke(client, token, 'create_platform_document', {'provider': 'feishu', 'title': 'x'}))
+        base = body(invoke(client, token, 'create_platform_base', {'provider': 'feishu', 'title': 'x'}))
+    finally:
+        main.app.dependency_overrides.clear()
+    assert 'create_platform_base' not in tools
+    assert tools['create_platform_document']['inputSchema']['properties']['provider']['enum'] == ['dingtalk']
+    assert tools['read_platform_resource']['inputSchema']['properties']['kind']['enum'] == ['document', 'spreadsheet']
+    assert tools['get_platform_authorization_status']['inputSchema']['properties']['provider']['enum'] == ['dingtalk']
+    assert '飞书' not in tools['create_platform_document']['description'].split('（当前渠道')[0].replace('飞书在发起人已完成本人授权时以本人身份创建，否则由机器人应用创建后把所有权转给发起人；', '')
+    assert blocked['state'] == 'channel_not_supported' and base['state'] == 'channel_not_supported'
+
+
+def test_feishu_channel_only_offers_feishu_capabilities(database, monkeypatch, fake_cli):
+    configure(monkeypatch)
+    token, _, _ = token_for(database, provider='feishu')
+    client, main = client_for(database)
+    try:
+        tools = listed_tools(client, token)
+        blocked = body(invoke(client, token, 'create_platform_document', {'provider': 'dingtalk', 'title': 'x'}))
+    finally:
+        main.app.dependency_overrides.clear()
+    assert 'create_platform_base' in tools
+    assert tools['create_platform_document']['inputSchema']['properties']['provider']['enum'] == ['feishu']
+    assert blocked['state'] == 'channel_not_supported'

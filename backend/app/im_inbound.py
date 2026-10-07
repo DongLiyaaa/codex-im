@@ -21,6 +21,7 @@ BOT_TTL, BOT_RETRY = 3600.0, 30.0
 # The whole lookup must stay well inside the platform's event acknowledgement window.
 QUOTE_DEPTH, QUOTE_CHARS, QUOTE_DEADLINE = 3, 3000, 2.5
 EMPTY = '请告诉我需要做什么，例如：「帮我新建一个飞书文档」或「读一下这个链接的内容」。'
+EMPTY_DINGTALK = '请告诉我需要做什么，例如：「帮我新建一个钉钉文档」或「读一下这个链接的内容」。'
 HINTS = {  # Message types we cannot read: tell the sender instead of silently dropping them.
     'audio': '暂不支持飞书语音消息，请改发文字。',
     'media': '暂不支持视频消息，请改发文字、图片或文件。',
@@ -279,5 +280,5 @@ def dingtalk(data):
     quoted = dingtalk_quote(data)
     content = compose(content.strip(), quoted)
     if not content.strip() and not refs:
-        return Inbound('', [], EMPTY)
+        return Inbound('', [], EMPTY_DINGTALK)
     return Inbound(content, refs)

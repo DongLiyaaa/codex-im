@@ -23,17 +23,24 @@ ALIASES = {'/help': 'help', '/帮助': 'help', '/new': 'new', '/新会话': 'new
 ROLES = {'super_admin': '超级管理员', 'org_admin': '组织管理员', 'team_lead': '团队负责人', 'member': '成员'}
 STATES = {'connected': '已连接', 'pending': '待你确认', 'starting': '发起中'}
 RUN_STATES = {'queued': '排队中', 'running': '执行中', 'waiting_attachments': '等待附件解析'}
-HELP = ('可用指令：\n'
-        '/help —— 查看本说明\n'
-        '/new —— 开启新会话，之前的上下文不再带入（历史保留在 Hub）\n'
-        '/stop —— 停止你排队中或执行中的任务\n'
-        '/status —— 查看身份、当前任务、可用能力、本人授权和待确认操作\n'
-        '/approve 审批码 —— 批准高风险操作（删除、覆盖整篇文档等）；/deny 审批码 拒绝\n\n'
-        '也可以直接用自然语言：\n'
-        '· 「新建一个飞书文档，标题××，内容××」\n'
-        '· 「建一个飞书表格 / 飞书多维表格」\n'
-        '· 「建一个钉钉文档 / 钉钉表格」（需先完成钉钉本人授权）\n'
-        '· 「发起飞书授权」「查看我的授权状态」')
+HELP_HEAD = ('可用指令：\n'
+             '/help —— 查看本说明\n'
+             '/new —— 开启新会话，之前的上下文不再带入（历史保留在 Hub）\n'
+             '/stop —— 停止你排队中或执行中的任务\n'
+             '/status —— 查看身份、当前任务、可用能力、本人授权和待确认操作\n'
+             '/approve 审批码 —— 批准高风险操作（删除、覆盖整篇文档等）；/deny 审批码 拒绝\n\n'
+             '也可以直接用自然语言：\n')
+HELP_TAILS = {
+    'feishu': ('· 「新建一个飞书文档，标题××，内容××」\n'
+               '· 「建一个飞书表格 / 飞书多维表格」\n'
+               '· 「发起飞书授权」「查看我的授权状态」'),
+    'dingtalk': ('· 「建一个钉钉文档 / 钉钉表格」（需先完成钉钉本人授权）\n'
+                 '· 「发起钉钉授权」「查看我的授权状态」'),
+}
+
+
+def help_text(provider):
+    return HELP_HEAD + HELP_TAILS[provider] if provider in HELP_TAILS else HELP_HEAD + HELP_TAILS['feishu'] + '\n' + HELP_TAILS['dingtalk']
 
 
 def parse(content):
@@ -43,17 +50,23 @@ def parse(content):
     return ALIASES.get(text.split()[0].lower())
 
 
-def _status(db, user, group, conversation):
+def _status(db, user, group, conversation, provider=None):
     active = db.scalar(select(Run).where(Run.conversation_id == conversation.id, Run.status.in_(ACTIVE))
                        .order_by(Run.created_at.desc()).limit(1))
     resources = policy.effective_resources(db, user, conversation)
     skills = [r.name for r in resources if r.kind == 'skill']
     mcps = [r.name for r in resources if r.kind == 'mcp']
     states = {}
-    for provider in ('feishu', 'dingtalk'):
-        row = db.get(PlatformConnection, (user.id, provider))
+    for name in ('feishu', 'dingtalk'):
+        row = db.get(PlatformConnection, (user.id, name))
         expired = bool(row and row.state == 'connected' and (not row.expires_at or row.expires_at <= now()))
-        states[provider] = '未连接' if not row or expired else STATES.get(row.state, '未连接')
+        states[name] = '未连接' if not row or expired else STATES.get(row.state, '未连接')
+    if provider == 'feishu':
+        auth, ability = f'飞书 {states["feishu"]}', '创建、读取、修改飞书的云文档、表格和多维表格'
+    elif provider == 'dingtalk':
+        auth, ability = f'钉钉 {states["dingtalk"]}', '创建、读取、修改钉钉的云文档与表格（暂不支持多维表格）'
+    else:
+        auth, ability = f'飞书 {states["feishu"]}，钉钉 {states["dingtalk"]}', '创建、读取、修改飞书/钉钉的云文档与表格（飞书含多维表格）'
     waiting = list(db.scalars(select(PlatformApproval).where(
         PlatformApproval.user_id == user.id, PlatformApproval.conversation_id == conversation.id,
         PlatformApproval.state == 'pending', PlatformApproval.expires_at > now()).order_by(PlatformApproval.created_at)))
@@ -63,8 +76,8 @@ def _status(db, user, group, conversation):
             + ''.join(f'待确认：{row.code} —— {row.summary[:60]}（/approve {row.code} 批准，/deny {row.code} 拒绝）\n' for row in waiting) +
             f'可用 Skill：{"、".join(skills) or "无"}\n'
             f'可用 MCP：{"、".join(mcps) or "无"}\n'
-            f'本人授权：飞书 {states["feishu"]}，钉钉 {states["dingtalk"]}\n'
-            '内置能力：创建、读取、修改飞书/钉钉的云文档与表格（飞书含多维表格）；删除、覆盖等高风险操作需你用 /approve 批准')
+            f'本人授权：{auth}\n'
+            f'内置能力：{ability}；删除、覆盖等高风险操作需你用 /approve 批准')
 
 
 def _stop(db, user, group, conversation, provider):
@@ -97,9 +110,9 @@ def _new(db, user, conversation):
 def handle(db, command, provider, event, user, group, conversation):
     """Runs inside the ingress transaction; queues the reply for the outbox thread."""
     if command == 'help':
-        text = HELP
+        text = help_text(provider)
     elif command == 'status':
-        text = _status(db, user, group, conversation)
+        text = _status(db, user, group, conversation, provider)
     elif command == 'stop':
         text = _stop(db, user, group, conversation, provider)
     else:

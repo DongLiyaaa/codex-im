@@ -1,6 +1,6 @@
 from fastapi import HTTPException
-from sqlalchemy import select
-from .models import User, Group, Resource, Binding
+from sqlalchemy import and_, or_, select
+from .models import User, Group, Resource, Binding, Organization, Department
 
 RANK = {'member': 0, 'team_lead': 1, 'org_admin': 2, 'super_admin': 3}
 
@@ -79,7 +79,27 @@ def can_manage_resource(actor, resource):
         actor.role == 'org_admin' and actor.org_id is not None and actor.org_id == resource.org_id))
 
 
+def in_resource_scope(resource, org_id, team_id):
+    """Global resources reach everyone, an organization's resources its members, a department's resources only that
+    department. An organization-level group (no department) therefore cannot use a department's resource."""
+    return ((resource.org_id is None or resource.org_id == org_id) and
+            (getattr(resource, 'team_id', None) is None or resource.team_id == team_id))
+
+
+class GrantScope:
+    """A whole organization or department as a grant subject, carrying the scope its grants are checked against."""
+
+    def __init__(self, org_id, team_id=None):
+        self.org_id, self.team_id = org_id, team_id
+
+
 def binding_subject(db, binding):
+    if binding.subject_type == 'org':
+        row = db.get(Organization, binding.subject_id)
+        return GrantScope(row.id) if row and row.archived_at is None else None
+    if binding.subject_type == 'team':
+        row = db.get(Department, binding.subject_id)
+        return GrantScope(row.org_id, row.id) if row and row.archived_at is None else None
     return db.get(User if binding.subject_type == 'user' else Group, binding.subject_id)
 
 
@@ -88,23 +108,46 @@ def can_manage_binding(db, actor, binding):
     resource = db.get(Resource, binding.resource_id)
     if not subject or not resource:
         return False
-    scope_ok = (resource.org_id is None or resource.org_id == subject.org_id or
+    scope_ok = (in_resource_scope(resource, subject.org_id, subject.team_id) or
                 (binding.subject_type == 'user' and subject.role == 'super_admin' and
                  actor.role == 'super_admin' and actor.id == subject.id))
-    subject_ok = (actor.id == subject.id or can_manage_user(actor, subject)) if binding.subject_type == 'user' else can_manage_group(db, actor, subject)
+    if binding.subject_type == 'user':
+        subject_ok = actor.id == subject.id or can_manage_user(actor, subject)
+    elif binding.subject_type == 'group':
+        subject_ok = can_manage_group(db, actor, subject)
+    else:
+        # Granting to a whole organization or department is an administrator's decision for that organization.
+        subject_ok = actor.active and (actor.role == 'super_admin' or (
+            actor.role == 'org_admin' and actor.org_id is not None and actor.org_id == subject.org_id))
     # Delegation of grants requires resource administration as well as subject scope.
     return scope_ok and subject_ok and can_manage_resource(actor, resource)
+
+
+def subject_keys(db, owner, kind):
+    """The grant subjects that reach a user or a group: itself, its department and its organization."""
+    keys = [(kind, owner.id)]
+    org = db.get(Organization, owner.org_id) if owner.org_id else None
+    if org and org.archived_at is None:
+        keys.append(('org', org.id))
+    team = db.get(Department, owner.team_id) if owner.org_id and owner.team_id else None
+    if team and team.archived_at is None and team.org_id == owner.org_id:
+        keys.append(('team', team.id))
+    return keys
+
+
+def granted_ids(db, keys):
+    return set(db.scalars(select(Binding.resource_id).where(
+        or_(*(and_(Binding.subject_type == kind, Binding.subject_id == identifier) for kind, identifier in keys)))))
 
 
 def effective_resources(db, user, conversation):
     if not can_send_conversation(db, user, conversation):
         return []
-    ids = set(db.scalars(select(Binding.resource_id).where(Binding.subject_type == 'user', Binding.subject_id == user.id)))
+    ids = granted_ids(db, subject_keys(db, user, 'user'))
+    owner = db.get(Group, conversation.group_id) if conversation.group_id else user
     if conversation.group_id:
-        group_ids = set(db.scalars(select(Binding.resource_id).where(Binding.subject_type == 'group', Binding.subject_id == conversation.group_id)))
-        ids &= group_ids
+        ids &= granted_ids(db, subject_keys(db, owner, 'group'))
     if not ids:
         return []
-    resource_org = db.get(Group, conversation.group_id).org_id if conversation.group_id else user.org_id
     return [r for r in db.scalars(select(Resource).where(Resource.id.in_(ids), Resource.enabled.is_(True)))
-            if r.org_id is None or r.org_id == resource_org]
+            if in_resource_scope(r, owner.org_id, owner.team_id)]

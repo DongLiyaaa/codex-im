@@ -49,7 +49,7 @@ it('offers personal management without a selected conversation or historical car
 });
 it('preserves management page and rejects member audit route', async () => {
   window.history.replaceState(null,'','#/resources'); const view=render(<App/>);
-  await waitFor(()=>expect(screen.getByRole('heading',{name:'能力资源'})).toBeTruthy());
+  await waitFor(()=>expect(screen.getByRole('heading',{name:'Skill和MCP管理'})).toBeTruthy());
   await act(async()=>{ window.location.hash='#/audit'; window.dispatchEvent(new HashChangeEvent('hashchange')); });
   await waitFor(()=>expect(window.location.hash).toBe('#/overview')); view.unmount();
 });

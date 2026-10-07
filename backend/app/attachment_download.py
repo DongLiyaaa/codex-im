@@ -23,7 +23,7 @@ class HTTPDownloadError(DownloadError):
 
 # Fixed official API hosts (never taken from user input) that may be re-resolved via DoH under Fake-IP DNS.
 DOH_HOSTS = frozenset({'open.feishu.cn', 'accounts.feishu.cn', 'api.dingtalk.com', 'login.dingtalk.com',
-                       'oapi.dingtalk.com', 'mcp.dingtalk.com'})
+                       'oapi.dingtalk.com', 'mcp.dingtalk.com', 'mcp-gw.dingtalk.com'})
 
 
 def public_addresses(addresses):
