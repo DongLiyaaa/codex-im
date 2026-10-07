@@ -134,10 +134,10 @@ Compose 栈由自带的 `db`（PostgreSQL 16）、`api`、`attachments`（附件
 - **第三方模型端点**：`CODEX_MODEL` 设模型 id，`CODEX_BASE_URL` 设 OpenAI 兼容的公网 https 地址（如 `https://models.example.com/v1`），并配 `OPENAI_API_KEY`、`CODEX_AUTH_MODE=api`。运行器会拒绝带账号/查询串/`..` 路径段的地址、非 443 端口、localhost、私网或保留地址；ChatGPT 登录模式下配置端点会直接报 `CODEX_BASE_URL_REQUIRES_API_MODE`，避免把登录令牌发给第三方。Key 只通过进程环境变量交给 Codex，不会写进 `config.toml`。模型 id 要与端点 `/models` 返回的完全一致（例如端点列的是 `gpt-6.1-sol`，写 `6.1-sol` 会得到 `model_not_found`）。
 - **Apple Silicon 上 amd64 的运行器无法启动 Codex 沙箱。** Docker Desktop 用 Rosetta 翻译 amd64 容器，Codex 为沙箱安装的 seccomp 过滤器是按 x86_64 编译的，arm64 内核拒绝它（`Invalid argument`），容器里没有任何办法绕过。同时 Docker 默认 seccomp 配置也拦截了沙箱需要的命名空间调用。因此默认栈里运行器会一直显示 `SANDBOX_UNAVAILABLE`。要让它在 Apple Silicon 上真正工作，显式启用原生 arm64 运行器（只有运行器改架构，其余服务仍是 amd64）：`docker compose --env-file .env.docker -f compose.yaml -f compose.runner-arm64.yaml up -d --build runner`。它会换上 `deploy/seccomp/runner.json`——Docker 官方默认配置加**一条**规则（放行 `clone`、`unshare`、`setns`、`mount`、`umount`、`umount2`、`pivot_root`、`sethostname`，由 `scripts/make_runner_seccomp.py` 生成，上游文件按 SHA-256 固定，改动上游必须先审核）。代价是运行器容器可以创建用户命名空间，内核攻击面比默认配置大；`cap_drop: ALL`、只读文件系统、`no-new-privileges`、网络隔离都不变。在 x86_64 的 Linux 主机上则不需要这个覆盖，只要放行同样的命名空间调用即可。
 - **让 arm64 选择对这个部署长期生效**：在本部署自己的 `.env.docker`（不进仓库）里加一行 `COMPOSE_FILE=compose.yaml:compose.runner-arm64.yaml`。否则以后有人执行不带 `-f` 的 `docker compose --env-file .env.docker up -d runner`，runner 会悄悄变回 amd64、沙箱检查重新失败。加了之后所有 `--env-file .env.docker` 的命令都自动带上覆盖；要回到 amd64，删掉这一行再重建 runner。`compose.yaml` 本身仍然默认 amd64。
-- **轮换模型 API Key**：先在模型服务商控制台生成新 Key，然后运行 `python3 scripts/rotate_model_key.py`（默认处理 `.env.docker`），在隐藏提示里粘贴新 Key——不要把 Key 写进命令行或贴到聊天里。脚本先用新 Key 请求端点的 `/models`（与 runner 一样直连，除非配置了 `CODEX_PROXY_URL`；不跟随重定向），模型在列表里才原子改写配置文件（权限 0600，其余行原样保留）；然后再用旧 Key 请求一次，确认服务商已拒绝它，最后只输出 HTTP 状态码。写完后执行 `docker compose --env-file .env.docker up -d --no-deps runner` 让 runner 用新 Key 重建。旧 Key 仍然有效时脚本以非零状态退出并提示去控制台吊销。
+- **轮换模型 API Key**：先在模型服务商控制台生成新 Key，然后运行 `python3 scripts/rotate_model_key.py`（默认处理 `.env.docker`），在隐藏提示里粘贴新 Key——不要把 Key 写进命令行或贴到聊天里。如果要让别人（例如协助的 Agent）代为执行，不要把 Key 发给对方，而是先把它从剪贴板写进一个只有自己能读的文件：`umask 077; pbpaste > .runtime/new-model-key`，再运行 `python3 scripts/rotate_model_key.py --key-file .runtime/new-model-key`。密钥文件必须是属于当前用户、不能被组或其他人访问的普通文件（符号链接、目录、管道、超过 512 字节的文件都会被拒绝），新 Key 验证通过并写入配置后脚本会删除这个文件；验证没通过时文件保留，方便重试。脚本先用新 Key 请求端点的 `/models`（与 runner 一样直连，除非配置了 `CODEX_PROXY_URL`；不跟随重定向），模型在列表里才原子改写配置文件（权限 0600，其余行原样保留）；然后再用旧 Key 请求一次，确认服务商已拒绝它，最后只输出 HTTP 状态码。写完后执行 `docker compose --env-file .env.docker up -d --no-deps runner` 让 runner 用新 Key 重建。旧 Key 仍然有效时脚本以非零状态退出并提示去控制台吊销。
 - **附件解析在容器里默认失败关闭**：只有 macOS 能在系统层面禁止解析进程联网，容器不能，所以 `ATTACHMENT_ALLOW_PROCESS_ONLY` 默认为 0，上传的附件会得到「此平台尚未配置解析进程网络隔离」。设为 1 表示接受“仅进程级资源限制、没有网络隔离”，请先评估风险。
 - **飞书只允许同一应用有一个长连接**：`im` profile 的 `im-feishu` / `im-dingtalk` 容器不在默认启动列表里。如果本机已有直接运行的 IM 进程，不要同时启动它们，否则两边会各收到一部分消息。
-- **迁移数据必须带上同一个 `SESSION_SECRET`**（以及 `PLATFORM_AUTH_KEY`、`IM_CONFIG_KEY`，若设置过），否则库里加密保存的 IM 配置和个人授权无法解密。
+- **迁移数据必须带上同一个 `SESSION_SECRET`**（以及 `PLATFORM_AUTH_KEY`、`IM_CONFIG_KEY`，若设置过），否则库里加密保存的 IM 配置、个人授权和 MCP 请求头密钥无法解密。
 - `CODEX_PROXY_URL` 在容器里要写 `http://host.docker.internal:端口`；运行器会自动让 `PLATFORM_BRIDGE_URL`、`ATTACHMENT_BRIDGE_URL` 里的服务名（如 `api`）绕过代理。
 - 带出网网络的容器（api、attachments、runner）在 Docker Desktop 上能通过 `host.docker.internal` 访问宿主机本地服务，这是 Docker Desktop 的通用行为，不是本栈的配置；详见影响清单。
 
@@ -182,10 +182,10 @@ scripts/run_local.py 和 run_runner_local.py 是可选项目开发启动器，�
 ## 页面使用
 
 1. 完成首次管理员注册并登录。**员工不需要 Agent Hub 账号，整个平台只需要超级管理员账号**：员工通过飞书/钉钉使用，由管理员在「IM 集成 → 待接入发现」一键接入（见第 5 步）。「用户与角色」只用于创建需要登录网页的管理账号（组织管理员等），新增表单按名称选择组织和部门，可直接新增中文命名目录，ID 自动生成。
-2. 资源管理新增 Skill（完整Markdown，含name和description frontmatter）或HTTPS MCP（仅443端口，支持headers，不支持stdio/OAuth登录流程）。
+2. 「Skill和MCP管理」新增 Skill 或 MCP，可限定给某个组织或某个部门使用（不选组织 = 全局；选了部门，只有该部门的成员和群能用，未设部门的组织级群不能用）。**Skill** 只需填写名称、用途说明和纯文字内容，也可直接导入 .txt / .md 文件（≤256KB）；技术头部由系统自动生成，不要求任何格式或符号。**MCP** 填写 HTTPS 服务地址（仅443端口，不支持stdio/OAuth登录流程），再选「不需要请求头」或「需要请求头」；需要时可添加多个请求头（最多10个），每个都有名称和密钥输入框，密钥保存时加密，列表和接口永远不返回明文。
 3. 授权管理为用户、群分别绑定资源。群聊必须两边均授权才生效。
 4. 聊天页创建私聊或群聊；右侧查看当前生效资源。执行队列异步刷新，同一会话只允许一个待执行任务。
-5. 左侧「IM 集成」中，超级管理员在「飞书应用配置」或「钉钉应用配置」填写应用ID、密钥、Robot Code与模式，点击「保存应用配置」。员工先向机器人发送消息，再在同页「待接入发现」刷新，点「处理接入」：默认「新建 IM 成员（无需网页账号）」，填写姓名（有昵称自动带入）、角色、组织和部门即可，成员创建与 IM 身份绑定在同一事务内完成；也可改选「绑定已有用户」并按需登记群、确认成员。平台ID自动预填。保留手动入口。授权后必须重发，发现不等于授权。配置加密保存在PG，空白密钥保留、勾选明确清除；独立IM监督进程每5秒检测并重连，API/worker每次操作读取新配置。启动方法与密钥轮换边界见 [IM_SETUP.md](docs/IM_SETUP.md)。
+5. 左侧「IM 集成」中，超级管理员在「飞书应用配置」或「钉钉应用配置」填写应用ID、密钥、Robot Code与模式，点击「保存应用配置」。员工先私聊机器人，再在同页「待接入发现」刷新，点「处理接入」：默认「新建 IM 成员（无需网页账号）」，填写姓名（有昵称自动带入）、角色、组织和部门即可，成员创建与 IM 身份绑定在同一事务内完成；也可改选「绑定已有用户」。**「IM 集成」只处理私聊；群聊的一切（群登记、群聊发送者接入、群成员确认、群名和群成员昵称的刷新）都在「协作群组」页**：先把机器人加入群、@ 机器人发一条消息，再到「协作群组」的「群聊发送者待接入」和「已发现群 / 待绑定」处理。平台ID自动预填。保留手动入口。授权后必须重发，发现不等于授权。配置加密保存在PG，空白密钥保留、勾选明确清除；独立IM监督进程每5秒检测并重连，API/worker每次操作读取新配置。启动方法与密钥轮换边界见 [IM_SETUP.md](docs/IM_SETUP.md)。
 
 **仅 IM 成员的边界**：只有超级管理员能创建，且只能是「成员」或「团队负责人」，管理员角色必须在「用户与角色」单独创建带凭据的账号；组织和部门必须是目录中已存在且未归档的条目，不接受手填 ID；请求体不接受邮箱、密码或启用状态，服务端写入不可验证的锁定密码（`!`，不是 `盐:摘要` 格式，任何输入都无法通过校验）和保留域 `im.invalid` 下的占位邮箱，所以这类成员不可能登录网页，列表里显示为「仅 IM 接入」而不显示占位邮箱，接口以 `login_enabled=false` 标记。该发送者已有绑定时只能走「绑定已有用户」，不会重复创建；并发双击由配置锁串行，只会创建一个成员。创建、身份绑定与审计在同一事务内，任何一步失败整体回滚。审计 `user.create`（`via=im_discovery`）和 `im.discovery.approve`（`created_user=true`）不记录姓名。新成员默认没有任何 Skill / MCP，仍需在「绑定与授权」单独授权。
 
@@ -236,10 +236,10 @@ services:
 
 ## 测试
 
-测试需要独立 PostgreSQL 测试库；检查测试 fixture 的 DATABASE_URL 配置后运行。使用随机隔离 schema，不要指向业务库。
+测试需要独立 PostgreSQL 测试库；使用随机隔离 schema，不要指向业务库，也不要另起固定端口的 PG 容器。`scripts/test_backend.sh` 按 `compose.test.yaml` 临时起一个测试库（独立项目 `codex-hub-v1-test`、Docker 分配的空闲端口、tmpfs 无卷、amd64、1 CPU/512MB），跑完无论成败都删除；上次残留时直接报错，不复用也不覆盖。
 
 ```bash
-PYTHONPATH=backend .venv/bin/python -m pytest backend/tests tests runner -q
+PYTHON=.venv/bin/python scripts/test_backend.sh            # 默认 backend/tests tests runner，可传 pytest 参数
 npm --prefix frontend test -- --run
 npm --prefix frontend run build
 ```
@@ -251,7 +251,7 @@ npm --prefix frontend run build
 - Codex Linux沙箱探测失败时拒绝执行；不自动降级为危险模式。Docker默认策略可能限制沙箱，需实际验证，不要直接启用privileged。
 - MCP初始URL/DNS拒绝私网，但仍需要部署层出站网络策略防范DNS重绑定和重定向。当前Compose未实现该策略；只应接入可信MCP。
 - Skill指令与模型提示不构成安全边界。当前禁用shell/写文件等能力，主要使用授权HTTP MCP；不支持需要脚本执行的任意Skill包。MCP内部的细粒度写操作审批尚未实现。
-- 数据库中的MCP配置由权限保护，但尚未使用KMS字段加密；需补密钥托管、备份恢复、TLS反代、审计保留、监控告警、限额与负载验证。
+- MCP 请求头的密钥值以 `enc1:` 前缀加密后保存（Fernet，密钥由 `SESSION_SECRET` 以独立域标签派生，与 IM 配置密钥互不相同）；仅在发起任务时由服务端解密发给 runner，网页与接口只显示请求头名称。旧版明文请求头保持可用。**更改 `SESSION_SECRET` 会使已保存的请求头密钥无法解密，任务会报 503 并提示重新创建该 MCP。** 服务地址、Skill 内容仍是普通字段，尚未使用 KMS；需补密钥托管、备份恢复、TLS反代、审计保留、监控告警、限额与负载验证。
 - 飞书支持 webhook/websocket，钉钉支持 legacy webhook/stream；Stream 应用 API 支持已授权群与单聊，legacy webhook 仍只回复固定群。配置与启动见 [IM_SETUP.md](docs/IM_SETUP.md)。连接配置与实际状态以运行时查询为准，未做真实平台收发验收。
 - IM输出截取前1800字符，完整内容保留网页；发送失败记录错误，不自动重试。刷新后按 URL 恢复所选会话，通过 state 接口继续同步运行状态。
 

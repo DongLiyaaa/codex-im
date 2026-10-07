@@ -101,8 +101,13 @@ def test_body_validation_and_generated_length():
     for index in (0, 2):
         assert len(results[index]['content']) == 64000
         validate_resource('skill', results[index])
-    for index in (1, 3, 4, 5, 6, 7):
+    for index in (1, 3, 4, 7):
         assert 'error' in results[index]
+    # Plain text that merely looks like a file header is still just the body the user typed.
+    for index, body in ((5, '---\nname: broken'), (6, ' \n---\nname: broken')):
+        content = results[index]['content']
+        assert content.startswith(header) and content[len(header):] == body
+        validate_resource('skill', results[index])
     with pytest.raises(HTTPException) as error:
         validate_resource('skill', {'content': header + 'x' * (size + 1)})
     assert '64000' in error.value.detail

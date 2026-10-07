@@ -66,7 +66,7 @@ def receive_dingtalk(payload, factory=SessionLocal):
                                message.conversation_id, inbound.content,
                                str(message.conversation_type) == '2', reply_mode='stream', nickname=payload.get('senderNick'),
                                chat_name=payload.get('conversationTitle'), notice=inbound.notice,
-                               sender_internal=im_inbound.dingtalk_internal(payload),
+                               sender_internal=im_inbound.dingtalk_internal(payload), corp_id=payload.get('chatbotCorpId'),
                                **({'attachment_refs': inbound.refs} if inbound.refs else {}))
     except (KeyError, TypeError, AttributeError, ValueError):
         im._reject(400)

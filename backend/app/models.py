@@ -2,7 +2,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint, JSON, Index, text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 def uid():
@@ -85,6 +85,23 @@ class Resource(Base):
     org_id: Mapped[str | None] = mapped_column(String(100), index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     config: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Narrows an organization's resource to one of its departments (kept in its own table so existing databases only
+    # need a new table, never an ALTER). Read and written through `team_id`.
+    department: Mapped['ResourceDepartment | None'] = relationship(lazy='joined', uselist=False, cascade='all, delete-orphan')
+
+    @property
+    def team_id(self):
+        return self.department.team_id if self.department else None
+
+    @team_id.setter
+    def team_id(self, value):
+        self.department = ResourceDepartment(team_id=value) if value else None
+
+
+class ResourceDepartment(Base):
+    __tablename__ = 'resource_departments'
+    resource_id: Mapped[str] = mapped_column(ForeignKey('resources.id'), primary_key=True)
+    team_id: Mapped[str] = mapped_column(String(100), index=True)
 
 
 class Binding(Base):
@@ -144,6 +161,9 @@ class Identity(Base):
     provider: Mapped[str] = mapped_column(String(20))
     external_user_id: Mapped[str] = mapped_column(String(200))
     user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), index=True)
+    # DingTalk staff ids are only unique inside one organization: the robot's corpId, recorded from the person's own
+    # internal messages, qualifies the id when a personal authorization names its account. Unused for Feishu.
+    corp_id: Mapped[str | None] = mapped_column(String(200))
 
 
 class SessionToken(Base):
@@ -196,6 +216,18 @@ class PlatformSettings(Base):
     provider: Mapped[str] = mapped_column(String(20), primary_key=True)
     revision: Mapped[int] = mapped_column(default=1)
     encrypted: Mapped[str] = mapped_column(Text)
+
+
+class PlatformAccess(Base):
+    """Which Hub users may authorize a platform in person. Kept in Hub because DingTalk's own CLI 可用人员 list has no
+    API; with the platform open to everyone, this is the list that decides. No row means everyone."""
+    __tablename__ = 'platform_access'
+    provider: Mapped[str] = mapped_column(String(20), primary_key=True)
+    revision: Mapped[int] = mapped_column(default=1)
+    user_scope: Mapped[str] = mapped_column(String(20), default='all')
+    user_ids: Mapped[list] = mapped_column(JSON, default=list)
+    updated_by: Mapped[str | None] = mapped_column(String(36))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class IMSettings(Base):

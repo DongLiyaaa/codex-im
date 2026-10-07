@@ -185,7 +185,8 @@ def test_failure_after_the_token_was_issued_is_terminal_and_never_polls_again(fl
     script.add(OPEN, TOKEN_PATH, token())
     script.add(OPEN, USER_PATH, ConnectionResetError('reset'))
     state, phase, error, device = poll_once(database, user_id)
-    assert (state, phase, error, device) == ('platform_rejected', 'done', 'PLATFORM_POLL_FAILED', {})
+    # Reported as the identity check it was, not as the platform rejecting the authorization.
+    assert (state, phase, error, device) == ('identity_unverified', 'done', 'IDENTITY_LOOKUP_FAILED', {})
     worker.tick(database)
     assert script.calls.count((OPEN, TOKEN_PATH)) == 1
 
@@ -235,3 +236,158 @@ def test_a_pending_answer_to_the_device_request_itself_is_never_a_started_author
     with pytest.raises(pa.ProviderError) as caught:
         pa.begin('feishu')
     assert caught.value.state == 'platform_rejected'
+
+
+@pytest.fixture
+def dingtalk_flow(database, monkeypatch):
+    """A DingTalk authorization delivered to the bound staff id, waiting for the user's approval."""
+    configure(monkeypatch)
+    monkeypatch.setattr(pa, 'begin', lambda provider: device(provider) | {'url': 'https://login.dingtalk.com/device'})
+    monkeypatch.setenv('DINGTALK_TRANSPORT', 'stream')
+    monkeypatch.setattr(broker, 'dispatch', lambda *args: None)
+    with database.begin() as db:
+        identity = Identity(user_id=db.scalar(select(User)).id, provider='dingtalk', external_user_id='staff-target')
+        db.add(identity)
+        db.flush()
+        pin(db, 'identity', identity.id, scope('dingtalk'))
+    user_id, _, _ = start_authorization(database, 'dingtalk', group=False)
+    worker.tick(database)
+    worker.tick(database)
+
+    def approve(**account):
+        monkeypatch.setattr(pa, 'poll', lambda *args: ('connected', {'access_token': opaque('USER', 'TOKEN'), 'expires_in': 7200, **account}))
+        return poll_once(database, user_id, 'dingtalk')
+
+    def corp(value):
+        with database.begin() as db:
+            db.scalar(select(Identity).where(Identity.provider == 'dingtalk')).corp_id = value
+    return approve, corp
+
+
+def test_dingtalk_account_named_by_the_exchange_connects_without_directory_calls(dingtalk_flow, monkeypatch):
+    """The CLI client's token is not an open-API token, and the robot has no member-read permission: neither is used."""
+    approve, corp = dingtalk_flow
+    corp('ding-corp')
+    monkeypatch.setattr(pa, 'request', lambda *args, **kwargs: pytest.fail('identity must come from the token exchange'))
+    state, phase, error, stored = approve(user_id='staff-target', corp_id='ding-corp')
+    assert (state, phase, error) == ('connected', 'notify', None)
+    assert (stored['user_id'], stored['corp_id']) == ('staff-target', 'ding-corp')
+
+
+@pytest.mark.parametrize('account', [{'user_id': 'someone-else', 'corp_id': 'ding-corp'},
+                                     # The same staff id in another organization is another person.
+                                     {'user_id': 'staff-target', 'corp_id': 'other-corp'},
+                                     {'user_id': 'staff-target'}])
+def test_dingtalk_other_account_is_refused(dingtalk_flow, account):
+    approve, corp = dingtalk_flow
+    corp('ding-corp')
+    assert approve(**account) == ('identity_mismatch', 'done', 'PLATFORM_IDENTITY_MISMATCH', {})
+
+
+def test_dingtalk_unknown_robot_organization_is_unverified_not_rejected(dingtalk_flow):
+    approve, _ = dingtalk_flow
+    assert approve(user_id='staff-target', corp_id='ding-corp') == ('identity_unverified', 'done', 'IDENTITY_ORG_UNKNOWN', {})
+
+
+MCP_GW, MCP_PATH = 'mcp-gw.dingtalk.com', '/server/db4b26cb38ea6a8739ad55d1997fa1da608cd36b33a6cf0f77884f70c49382fe'
+
+
+def profile(payload, structured=True):
+    """The contact MCP server's tools/call answer: the tool's JSON as text, and the same object structured."""
+    result = {'content': [{'type': 'text', 'text': json.dumps(payload, ensure_ascii=False)}]}
+    return (200, {'jsonrpc': '2.0', 'id': 1, 'result': result | ({'structuredContent': payload} if structured else {})})
+
+
+def employee(corp, user):
+    return {'orgEmployeeModel': {'corpId': corp, 'orgName': '组织', 'userId': user, 'orgUserName': '本人'}}
+
+
+@pytest.fixture
+def contact(dingtalk_flow, monkeypatch):
+    """The CLI exchange named no account (as for this organization), so the contact MCP profile is asked."""
+    approve, corp = dingtalk_flow
+    corp('ding-corp')
+    script = Script()
+    script.install(monkeypatch)
+
+    def answer(*answers):
+        script.add(MCP_GW, MCP_PATH, *answers)
+        return approve()
+    return answer, script
+
+
+@pytest.mark.parametrize('payload', [{'success': True, 'result': [employee('ding-corp', 'staff-target')]},
+                                     # Several organizations: the robot's one decides.
+                                     {'success': True, 'result': [employee('other-corp', 'staff-x'), employee('ding-corp', 'staff-target')]},
+                                     {'result': {'corpId': 'ding-corp', 'userid': 'staff-target'}},
+                                     # An account without organization is accepted only as the single one.
+                                     {'result': [{'orgEmployeeModel': {'orgUserId': 'staff-target'}}]}])
+def test_dingtalk_contact_profile_naming_the_bound_person_connects(contact, payload):
+    answer, script = contact
+    state, phase, error, stored = answer(profile(payload))
+    assert (state, phase, error) == ('connected', 'notify', None) and 'user_id' not in stored
+    assert script.calls == [(MCP_GW, MCP_PATH)]  # No open-API or robot directory call.
+
+
+def test_dingtalk_contact_profile_text_only_answer_is_read(contact):
+    answer, _ = contact
+    assert answer(profile({'result': [employee('ding-corp', 'staff-target')]}, structured=False))[:3] == ('connected', 'notify', None)
+
+
+@pytest.mark.parametrize('payload', [{'result': [employee('ding-corp', 'someone-else')]},
+                                     {'result': [employee('other-corp', 'staff-target')]},
+                                     {'result': [{'orgEmployeeModel': {'userId': 'staff-target'}}, {'orgEmployeeModel': {'userId': 'staff-x'}}]},
+                                     {'result': []}])
+def test_dingtalk_contact_profile_naming_someone_else_is_refused(contact, payload):
+    answer, _ = contact
+    assert answer(profile(payload)) == ('identity_mismatch', 'done', 'PLATFORM_IDENTITY_MISMATCH', {})
+
+
+@pytest.mark.parametrize('answer_, reason', [
+    (profile({'success': False, 'code': 'PAT_LOW_RISK_NO_PERMISSION', 'message': '无权限'}), 'IDENTITY_CONTACT_DENIED'),
+    (profile({'success': False, 'code': 'TOKEN_VERIFIED_FAILED', 'error': 'Token验证失败'}), 'IDENTITY_TOKEN_REJECTED'),
+    (profile({'success': False, 'code': 'SOMETHING_NEW'}), 'IDENTITY_LOOKUP_FAILED'),
+    ((401, {'error': 'unauthorized'}), 'IDENTITY_LOOKUP_FAILED'),
+    ((503, {}), 'IDENTITY_LOOKUP_FAILED'),
+    (ConnectionResetError('reset'), 'IDENTITY_LOOKUP_FAILED'),
+    ((200, {'jsonrpc': '2.0', 'id': 1, 'error': {'code': -32601}}), 'IDENTITY_LOOKUP_FAILED')])
+def test_dingtalk_contact_profile_failures_are_unverified_with_their_reason(contact, database, answer_, reason):
+    answer, _ = contact
+    assert answer(answer_) == ('identity_unverified', 'done', reason, {})
+    with database.begin() as db:
+        shown = broker.status(db, db.scalar(select(User)), 'dingtalk')
+    assert (shown['state'], shown['error_code'], shown['message']) == ('identity_unverified', reason, pa.UNVERIFIED[reason])
+
+
+def test_dingtalk_unknown_organization_asks_nobody(dingtalk_flow, monkeypatch):
+    approve, _ = dingtalk_flow
+    monkeypatch.setattr(pa, 'request', lambda *args, **kwargs: pytest.fail('the staff id cannot be matched without the organization'))
+    assert approve() == ('identity_unverified', 'done', 'IDENTITY_ORG_UNKNOWN', {})
+
+
+def test_platform_refusing_the_identity_call_is_unverified_not_rejected(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise pa.ProviderError('platform_rejected')
+    monkeypatch.setattr(pa, 'request', refuse)
+    with pytest.raises(pa.ProviderError) as caught:
+        worker.verified(None, 'feishu', {'access_token': 'T'}, 'sender', {})
+    assert (caught.value.state, caught.value.reason) == ('identity_unverified', 'IDENTITY_LOOKUP_FAILED')
+
+
+def test_internal_dingtalk_message_records_the_robot_organization(database, monkeypatch):
+    from app.im import _enqueue
+    from app.models import uid
+    monkeypatch.setenv('DINGTALK_TRANSPORT', 'stream')
+    with database.begin() as db:
+        identity = Identity(user_id=db.scalar(select(User)).id, provider='dingtalk', external_user_id='staff-target')
+        db.add(identity)
+        db.flush()
+        pin(db, 'identity', identity.id, scope('dingtalk'))
+
+    def message(**origin):
+        with database.begin() as db:
+            _enqueue(db, 'dingtalk', uid(), 'staff-target', 'private-chat', '你好', False, reply_mode='stream', **origin)
+        with database() as db:
+            return db.scalar(select(Identity.corp_id).where(Identity.provider == 'dingtalk'))
+    assert message(sender_internal=False, corp_id='ding-corp') is None  # An external sender never names the organization.
+    assert message(sender_internal=True, corp_id='ding-corp') == 'ding-corp'

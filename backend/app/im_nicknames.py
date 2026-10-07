@@ -131,9 +131,15 @@ def _summary(status, users=None, chats=None):
     return result
 
 
-def _missing(app_scope):
-    return (select(IMDiscovery).where(IMDiscovery.provider == 'feishu', IMDiscovery.app_scope == app_scope,
-                                      IMDiscovery.nickname.is_(None)))
+def _missing(app_scope, kind=None):
+    query = select(IMDiscovery).where(IMDiscovery.provider == 'feishu', IMDiscovery.app_scope == app_scope,
+                                      IMDiscovery.nickname.is_(None))
+    # kind only chooses whom to look up; a name that is found is written to every row of that sender.
+    if kind == 'group':
+        query = query.where(IMDiscovery.chat_type == 'group')
+    elif kind == 'private':
+        query = query.where(IMDiscovery.chat_type != 'group')
+    return query
 
 
 def _unnamed_chats(app_scope):
@@ -144,11 +150,12 @@ def _unnamed_chats(app_scope):
             .group_by(IMDiscovery.chat_id).order_by(func.max(IMDiscovery.last_seen).desc()).limit(500))
 
 
-def refresh(db, client_factory=None):
+def refresh(db, client_factory=None, kind=None):
+    """kind 'private': senders of private chats only. 'group': group senders and group names. None: both."""
     if not _refresh_lock.acquire(blocking=False):
         return _summary('busy')
     try:
-        return _refresh(db, client_factory or _client)
+        return _refresh(db, client_factory or _client, kind)
     finally:
         _refresh_lock.release()
 
@@ -195,7 +202,7 @@ def _lookup(client_factory, pending, chats):
     return (resolved, failed, attempted), (chat_resolved, chat_failed, chat_attempted)
 
 
-def _refresh(db, client_factory):
+def _refresh(db, client_factory, kind=None):
     from .im_discovery import scope, configuration_lock, store_chat_names
     with im_settings.snapshot(db, 'feishu'):
         try:
@@ -204,8 +211,8 @@ def _refresh(db, client_factory):
             return _summary('unconfigured')
         if not im_settings.value('FEISHU_APP_SECRET'):
             return _summary('unconfigured')
-        rows = list(db.scalars(_missing(app_scope).order_by(IMDiscovery.last_seen.desc()).limit(500)))
-        unnamed = list(db.scalars(_unnamed_chats(app_scope)))
+        rows = list(db.scalars(_missing(app_scope, kind).order_by(IMDiscovery.last_seen.desc()).limit(500)))
+        unnamed = [] if kind == 'private' else list(db.scalars(_unnamed_chats(app_scope)))
         # End the read transaction before any outbound request.
         db.commit()
         senders, cached = {}, 0

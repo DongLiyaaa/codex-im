@@ -57,6 +57,25 @@ def test_private_delivery_poll_completion(database, monkeypatch, group):
         assert not next(m for m in other_entries if 'platform_authorization' in m)['platform_authorization']['can_open']
 
 
+def test_organization_denial_reason_reaches_status(database, monkeypatch):
+    configure(monkeypatch)
+    monkeypatch.setattr(pa, 'begin', device)
+    monkeypatch.setattr(broker, 'dispatch', lambda *args: None)
+    def denied(*args):
+        raise pa.ProviderError('organization_denied', 'CLI_USER_FORBIDDEN')
+    monkeypatch.setattr(pa, 'poll', denied)
+    user_id, run_id, output = request(database, group=False)
+    worker.tick(database); worker.tick(database)
+    with database.begin() as db:
+        connection = db.get(PlatformConnection, (user_id, 'feishu')); connection.next_poll_at = now() - timedelta(seconds=1)
+    worker.tick(database); worker.tick(database)
+    with database.begin() as db:
+        out = broker.status(db, db.get(User, user_id), 'feishu')
+    # An administrator account is not enough when the organization restricts who may use CLI data access; say exactly where.
+    assert out['state'] == 'organization_denied' and out['error_code'] == 'CLI_USER_FORBIDDEN'
+    assert out['message'] == pa.DENIALS['CLI_USER_FORBIDDEN'] and '可用人员设置' in out['message']
+
+
 def test_cross_provider_never_uses_source_identity(database, monkeypatch):
     configure(monkeypatch); monkeypatch.setattr(pa,'begin',device)
     sent=[];monkeypatch.setattr(broker,'dispatch',lambda *args:sent.append(args))

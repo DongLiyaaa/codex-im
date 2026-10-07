@@ -40,6 +40,8 @@ KINDS = {'feishu': ('document', 'spreadsheet', 'base'), 'dingtalk': ('document',
 FEISHU_TYPES = {'document': 'docx', 'spreadsheet': 'sheet', 'base': 'bitable'}
 FEISHU_PATHS = {'docx': 'document', 'sheets': 'spreadsheet', 'base': 'base', 'wiki': None}
 HOSTS = {'feishu': ('feishu.cn', 'larksuite.com'), 'dingtalk': ('dingtalk.com',)}
+URL_KEYS = ('url', 'docUrl')
+DINGTALK_NODE = 'https://alidocs.dingtalk.com/i/nodes/'
 TOKEN_KEYS = ('document_id', 'spreadsheet_token', 'base_token', 'dentryUuid', 'nodeId', 'docKey', 'workbookId')
 TOKEN = re.compile(r'[A-Za-z0-9_-]{8,128}')
 CELL = re.compile(r'([A-Z]{1,3})([1-9][0-9]{0,6})')
@@ -105,10 +107,13 @@ def _first(data, keys, prefix=''):
 def extract(provider, data):
     url = token = None
     for key, value in _walk(data):
-        if url is None and key == 'url' and isinstance(value, str) and official(provider, value):
+        if url is None and key in URL_KEYS and isinstance(value, str) and official(provider, value):
             url = value
         if token is None and key in TOKEN_KEYS and isinstance(value, str) and value.isascii() and 0 < len(value) <= 128:
             token = value
+    if url is None and provider == 'dingtalk' and token and TOKEN.fullmatch(token):
+        # dws names its link docUrl and documents it as sometimes absent; a DingTalk node's address follows from its id.
+        url = DINGTALK_NODE + token
     return url, token
 
 
@@ -262,7 +267,9 @@ def in_group(db, run):
 
 def personal_token(db, actor, provider):
     """Connected personal token with the current scope set, or None."""
-    from . import platform_auth
+    from . import platform_auth, platform_access
+    if not platform_access.allowed(db, actor, provider):
+        return None  # Taken off the administrator's 可用人员 list; any stored authorization is no longer theirs to use.
     row = db.get(PlatformConnection, (actor.id, provider))
     if not row or row.state != 'connected' or not row.expires_at or row.expires_at <= now():
         return None
@@ -274,6 +281,16 @@ def personal_token(db, actor, provider):
     if required and not required.issubset(set(str(data.get('scope', '')).split())):
         return None  # Authorized before the scope expansion; needs a fresh authorization.
     return data.get('access_token') or None
+
+
+def refused(db, actor, provider, group=False):
+    """Why a personal token is missing: a group chat, the 可用人员 list, or no authorization yet."""
+    from . import platform_access
+    if group:
+        return WorkspaceError('private_chat_required', 'use_private_chat')
+    if not platform_access.allowed(db, actor, provider):
+        return WorkspaceError('user_not_allowed', 'contact_admin')
+    return WorkspaceError('authorization_required', 'request_platform_authorization')
 
 
 def hub_created(db, actor, provider, token):
@@ -308,7 +325,7 @@ def _dingtalk_job(db, actor, job):
     from . import platform_auth, platform_settings
     token = personal_token(db, actor, 'dingtalk')
     if not token:
-        raise WorkspaceError('authorization_required', 'request_platform_authorization')
+        raise refused(db, actor, 'dingtalk')
     with platform_settings.snapshot(db, 'dingtalk'):
         client_id = platform_auth.credentials('dingtalk')[0]
     job['identity'] = 'user'
@@ -388,9 +405,7 @@ def _access(db, actor, run, provider, kind, args, write):
         return _dingtalk_job(db, actor, job)
     user_token = None if group else personal_token(db, actor, 'feishu')
     if not user_token and not hub_created(db, actor, 'feishu', token):
-        if group:
-            raise WorkspaceError('private_chat_required', 'use_private_chat')
-        raise WorkspaceError('authorization_required', 'request_platform_authorization')
+        raise refused(db, actor, 'feishu', group)
     job['identity'] = 'user' if user_token else 'bot'
     job['env'] = _feishu_env(db, user_token)
     return job
@@ -701,13 +716,11 @@ def prepare_command(db, actor, run, provider, kind, args, approved=None):
         if not user_token:
             # Bot identity: only the requester's Hub-created resource, pinned by the server.
             if not args.get('target_url'):
-                raise WorkspaceError('private_chat_required' if group else 'authorization_required',
-                                     'use_private_chat' if group else 'request_platform_authorization')
+                raise refused(db, actor, 'feishu', group)
             url, token = resource('feishu', None, args['target_url'])
             if (path[0] not in BOT_DOMAINS or not path[1].startswith('+') or BOT_FORBIDDEN.search(path[1])
                     or not hub_created(db, actor, 'feishu', token)):
-                raise WorkspaceError('private_chat_required' if group else 'authorization_required',
-                                     'use_private_chat' if group else 'request_platform_authorization')
+                raise refused(db, actor, 'feishu', group)
             job['token'] = token
         job['identity'] = 'user' if user_token else 'bot'
         job['env'] = _feishu_env(db, user_token)
@@ -715,8 +728,7 @@ def prepare_command(db, actor, run, provider, kind, args, approved=None):
     if job.get('token'):
         flag, value = next(((f, v) for f, v in BOT_TARGET_FLAGS if f in spec['flags']), (None, None))
         if not flag:
-            raise WorkspaceError('private_chat_required' if group else 'authorization_required',
-                                 'use_private_chat' if group else 'request_platform_authorization')
+            raise refused(db, actor, 'feishu', group)
         target = [f'--{flag}={url if value == "url" else job["token"]}']
     argv = list(path) + _flag_args(spec, args.get('flags') or {}, stdin, bool(job.get('token'))) + target
     if spec['high']:
@@ -783,6 +795,7 @@ MESSAGES = {
     'identity_missing': '尚未绑定你在该平台的身份，无法把文档交给你，请联系管理员绑定后重试。',
     'authorization_required': '读写你已有的云文档需要以你本人身份进行，请先完成本人授权（私聊机器人说「发起飞书授权」或「发起钉钉授权」），授权后重新发送任务。由 Hub 为你创建的飞书文档无需本人授权即可读写。',
     'private_chat_required': '在群聊中只能读写 Hub 为你创建的飞书文档；读写你本人的其它云文档请私聊机器人，避免群内消息影响你的个人文档。',
+    'user_not_allowed': '管理员未把你列入该平台的「个人授权可用人员」，不能以你本人身份读写云文档。请联系 Agent Hub 超级管理员在「IM 集成」页添加你后，再发起本人授权。',
     'authorization_expired': '本人授权已失效，请重新发起授权后再试。',
     'resource_not_found': '找不到该资源或你没有访问权限，请核对链接。',
     'platform_permission_missing': '平台拒绝了操作：应用或本人缺少对应权限，或该文档未对你/机器人开放。',

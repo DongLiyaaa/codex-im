@@ -3,42 +3,52 @@ import threading
 from datetime import timedelta
 from sqlalchemy import select, or_
 from .db import SessionLocal
-from .models import PlatformAuthJob, PlatformConnection, User, now
+from .models import Identity, PlatformAuthJob, PlatformConnection, User, now
 from . import platform_auth as pa, platform_broker as broker, platform_settings as settings
 
 # Consecutive transient poll failures tolerated before an authorization is given up (about a minute at 5s).
 MAX_POLL_FAILURES = 12
 
 
-def identity_matches(provider, tokens, recipient, values):
+def identity_matches(provider, tokens, recipient, values, corp=None):
+    """Whether the authorized account is the bound person; ProviderError when the platform cannot tell."""
     token = tokens.get('access_token')
     if not isinstance(token, str) or not token or len(token) > 8192:
         return False
     if provider == 'feishu':
         data = pa.request('GET', 'https://open.feishu.cn/open-apis/authen/v1/user_info', headers={'Authorization': 'Bearer ' + token})
         return data.get('code') == 0 and (data.get('data') or {}).get('open_id') == recipient
-    data = pa.request('GET', 'https://api.dingtalk.com/v1.0/contact/users/me', headers={'x-acs-dingtalk-access-token': token})
-    union_id = data.get('unionId')
-    if not isinstance(union_id, str) or not union_id:
-        return False
-    from . import im, im_settings
-    snapshot_token = im_settings._active.set(values)
+    # A DingTalk staff id only means this person inside the robot's organization, which is known once they have
+    # messaged the robot from inside it.
+    if not corp:
+        raise pa.ProviderError('identity_unverified', 'IDENTITY_ORG_UNKNOWN')
+    if tokens.get('user_id'):
+        # Named by the official CLI exchange.
+        return tokens.get('corp_id') == corp and tokens['user_id'] == recipient
+    # Otherwise ask the contact MCP server whose token this is, as dws does.
+    accounts = pa.dingtalk_accounts(token)
+    if any(org == corp and user == recipient for org, user in accounts):
+        return True
+    # An account without its organization only names the person when it is the only one (dws accepts it likewise).
+    return (len(accounts) == 1 and accounts[0] == (None, recipient)
+            and tokens.get('corp_id') in (None, corp))
+
+
+def corp_of(factory, provider, recipient):
+    if provider != 'dingtalk' or not recipient:
+        return None
+    with factory() as db:
+        return db.scalar(select(Identity.corp_id).where(Identity.provider == provider, Identity.external_user_id == recipient))
+
+
+def verified(factory, provider, tokens, recipient, values):
     try:
-        class Client:
-            def post(self, url, **kwargs):
-                result = pa.request('POST', url, **kwargs)
-                class Response:
-                    def raise_for_status(self):
-                        pass
-                    def json(self):
-                        return result
-                return Response()
-        app_token = im.access_token(Client(), 'dingtalk')
-        mapped = pa.request('POST', 'https://oapi.dingtalk.com/topapi/user/getbyunionid',
-            params={'access_token': app_token}, json={'unionid': union_id})
-        return mapped.get('errcode') == 0 and (mapped.get('result') or {}).get('userid') == recipient
-    finally:
-        im_settings._active.reset(snapshot_token)
+        return bool(recipient) and identity_matches(provider, tokens, recipient, values, corp_of(factory, provider, recipient))
+    except pa.ProviderError as exc:
+        # Authorization itself succeeded; only "is this the bound person" could not be answered.
+        raise pa.ProviderError('identity_unverified', exc.reason or 'IDENTITY_LOOKUP_FAILED') from None
+    except (ValueError, OSError):
+        raise pa.ProviderError('identity_unverified', 'IDENTITY_LOOKUP_FAILED') from None
 
 
 def tick(factory=SessionLocal):
@@ -131,7 +141,7 @@ def perform(factory, user_id, provider):
                             im_values, _ = im_settings.effective(db, provider)
                 if (type(tokens.get('expires_in')) is not int or tokens['expires_in'] <= 0):
                     raise ValueError('invalid_token_expiry')
-                if not recipient or not identity_matches(provider, tokens, recipient, im_values):
+                if not verified(factory, provider, tokens, recipient, im_values):
                     outcome, tokens, error = 'identity_mismatch', {}, 'PLATFORM_IDENTITY_MISMATCH'
         elif operation == 'validate':
             if not recipient:
@@ -140,7 +150,7 @@ def perform(factory, user_id, provider):
                     recipient = identity.external_user_id if identity else None
                     from . import im_settings
                     im_values, _ = im_settings.effective(db, provider)
-            outcome = 'valid' if recipient and identity_matches(provider, device, recipient, im_values) else 'expired'
+            outcome = 'valid' if verified(factory, provider, device, recipient, im_values) else 'expired'
         elif operation == 'notify':
             broker.dispatch(provider, recipient, im_values, '本人平台授权已完成。请重新发送任务；此前任务不会自动执行。', generation + '-complete')
             outcome = 'notified'
