@@ -29,5 +29,10 @@ RUN mkdir -p /data/attachments && chown 10001:10001 /data/attachments && chmod 7
 ENV STATIC_DIR=/app/static ATTACHMENT_ROOT=/data/attachments \
     PLATFORM_LARK_CLI=/opt/platform-cli/lark-cli PLATFORM_DWS_CLI=/opt/platform-cli/dws
 USER 10001
+ARG VERSION=0.0.2
+LABEL org.opencontainers.image.source="https://github.com/DongLiyaaa/codex-im" \
+      org.opencontainers.image.description="Agent Hub API、网页与飞书/钉钉接入进程" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.licenses="NOASSERTION"
 EXPOSE 18200
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "18200", "--workers", "1"]
