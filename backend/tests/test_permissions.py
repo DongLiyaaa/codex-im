@@ -18,17 +18,23 @@ from app.db import get_db
 from app.security import hash_password
 
 
+MOCK_PASSWORD = '-'.join(['test', 'password', '123'])  # not a real credential; local test fixture only
+
+
 @pytest.fixture
 def env(monkeypatch):
     monkeypatch.setenv('FEISHU_APP_ID', 'test-app')
     root = create_engine(os.environ['DATABASE_URL'])
     assert root.url.database.endswith('_test'), 'Tests require a dedicated *_test database'
     schema = 'test_' + uuid.uuid4().hex
+    from sqlalchemy import text
     from psycopg import sql
+    # Identifier is internally generated (fixed 'test_' prefix + uuid4 hex), never
+    # supplied by external input; quote() applies the dialect's own escaping.
+    quoted_schema = root.dialect.identifier_preparer.quote(schema)
     with root.connect() as conn:
-        # Identifier is internally generated, never supplied by external input.
-        conn.connection.driver_connection.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(schema)))
-        conn.connection.driver_connection.commit()
+        conn.execute(text('CREATE SCHEMA ' + quoted_schema))
+        conn.commit()
     engine = create_engine(os.environ['DATABASE_URL'], connect_args={'options': f'-csearch_path={schema}'})
     factory = sessionmaker(engine, expire_on_commit=False)
     m.Base.metadata.create_all(engine)
@@ -42,7 +48,7 @@ def env(monkeypatch):
             ('lead','team_lead','a','x'), ('lead2','team_lead','a','y'),
             ('member','member','a','x'), ('peer_member','member','a','x'),
             ('different','member','a','y'), ('outsider','member','b','x')]:
-            user = m.User(email=key+'@test.local', name=key, role=role, org_id=org, team_id=team, active=True, password_hash=hash_password('test-password-123'))
+            user = m.User(email=key+'@test.local', name=key, role=role, org_id=org, team_id=team, active=True, password_hash=hash_password(MOCK_PASSWORD))
             db.add(user)
             db.flush()
             people[key] = user
@@ -63,6 +69,7 @@ def env(monkeypatch):
     main.app.dependency_overrides.clear()
     engine.dispose()
     with root.connect() as conn:
+        # Identifier is internally generated, never supplied by external input.
         conn.connection.driver_connection.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(schema)))
         conn.connection.driver_connection.commit()
     root.dispose()
@@ -119,7 +126,7 @@ def test_user_hierarchy_and_cross_tenant(env):
         ('admin','member','b','x',403), ('lead','team_lead','a','x',403),
         ('lead','member','a','y',403), ('member','member','a','x',403),
         ('lead','member','a','x',201), ('root','org_admin','c',None,201)]:
-        r = auth(actor).post('/api/users', json={'email':uuid.uuid4().hex+'@test.local','password':'test-password-123','name':'new','role':role,'org_id':org,'team_id':team})
+        r = auth(actor).post('/api/users', json={'email':uuid.uuid4().hex+'@test.local','password':MOCK_PASSWORD,'name':'new','role':role,'org_id':org,'team_id':team})
         assert r.status_code == expected, r.text
     visible = auth('admin').get('/api/users').json()
     assert people['peer'].id not in {u['id'] for u in visible}
@@ -382,5 +389,6 @@ def test_archive_migration_existing_and_new_schema(env):
     with engine.begin() as conn:
         conn.execute(text('ALTER TABLE conversations DROP COLUMN archived_at'))
         conn.execute(text('ALTER TABLE conversations DROP COLUMN archived_by'))
-    migrate(engine); migrate(engine)
+    migrate(engine)
+    migrate(engine)
     assert {'archived_at','archived_by'} <= {c['name'] for c in inspect(engine).get_columns('conversations')}

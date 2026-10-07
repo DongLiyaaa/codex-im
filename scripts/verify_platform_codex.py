@@ -72,7 +72,8 @@ def main():
         print('REAL_CODEX_BRIDGE_PASS; isolated PG; no external platform login')
         # Exercise the real Codex tool again with only isolated fake issuer/IM.
         from test_platform_auth import device
-        patch.setenv('PLATFORM_FEISHU_CLIENT_ID', 'client')
+        # Personal OAuth must be the same app as the isolated bot identity ('app' in the test fixtures).
+        patch.setenv('PLATFORM_FEISHU_CLIENT_ID', 'app')
         patch.setenv('PLATFORM_FEISHU_CLIENT_SECRET', 'secret')
         patch.setattr(platform_auth, 'begin', device)
         sent = []

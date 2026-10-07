@@ -1,0 +1,22 @@
+# Opt-in override: run ONLY the runner as a native linux/arm64 container with a seccomp profile that lets the Codex
+# (bubblewrap) sandbox start. Everything else in the stack stays linux/amd64.
+#
+#   docker compose --env-file .env.docker -f compose.yaml -f compose.runner-arm64.yaml up -d --build runner
+#
+# Why this exists: on Apple Silicon an amd64 container is translated by Rosetta, and the seccomp filter Codex installs
+# for its sandbox is built for x86_64, which the arm64 kernel rejects ("Invalid argument"). Nothing in the container
+# can fix that, so the runner has to be native. Docker's default seccomp profile also blocks the namespace calls
+# bubblewrap needs, hence deploy/seccomp/runner.json (the default profile plus ONE rule; see
+# scripts/make_runner_seccomp.py). Not a replacement for the amd64 default: choose it knowingly.
+services:
+  runner:
+    image: codex-hub-v1-runner:arm64-local
+    platform: linux/arm64
+    build:
+      context: ./runner
+      dockerfile: Dockerfile
+      args:
+        RUNNER_PLATFORM: linux/arm64
+    # Lists are appended to the ones in compose.yaml, so no-new-privileges stays in force without being repeated.
+    security_opt:
+      - seccomp=./deploy/seccomp/runner.json

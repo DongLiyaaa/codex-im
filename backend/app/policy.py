@@ -79,6 +79,13 @@ def can_manage_resource(actor, resource):
         actor.role == 'org_admin' and actor.org_id is not None and actor.org_id == resource.org_id))
 
 
+def in_resource_scope(resource, org_id, team_id):
+    """Global resources reach everyone, an organization's resources its members, a department's resources only that
+    department. An organization-level group (no department) therefore cannot use a department's resource."""
+    return ((resource.org_id is None or resource.org_id == org_id) and
+            (getattr(resource, 'team_id', None) is None or resource.team_id == team_id))
+
+
 def binding_subject(db, binding):
     return db.get(User if binding.subject_type == 'user' else Group, binding.subject_id)
 
@@ -88,7 +95,7 @@ def can_manage_binding(db, actor, binding):
     resource = db.get(Resource, binding.resource_id)
     if not subject or not resource:
         return False
-    scope_ok = (resource.org_id is None or resource.org_id == subject.org_id or
+    scope_ok = (in_resource_scope(resource, subject.org_id, subject.team_id) or
                 (binding.subject_type == 'user' and subject.role == 'super_admin' and
                  actor.role == 'super_admin' and actor.id == subject.id))
     subject_ok = (actor.id == subject.id or can_manage_user(actor, subject)) if binding.subject_type == 'user' else can_manage_group(db, actor, subject)
@@ -105,6 +112,6 @@ def effective_resources(db, user, conversation):
         ids &= group_ids
     if not ids:
         return []
-    resource_org = db.get(Group, conversation.group_id).org_id if conversation.group_id else user.org_id
+    owner = db.get(Group, conversation.group_id) if conversation.group_id else user
     return [r for r in db.scalars(select(Resource).where(Resource.id.in_(ids), Resource.enabled.is_(True)))
-            if r.org_id is None or r.org_id == resource_org]
+            if in_resource_scope(r, owner.org_id, owner.team_id)]

@@ -15,7 +15,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, text, update
 from .db import engine, SessionLocal
 from .models import Audit, Conversation, Message, Run, User
-from . import policy, schemas
+from . import policy, resource_secrets, schemas
 
 log = logging.getLogger(__name__)
 WORKER_LOCK = 731940281
@@ -44,16 +44,16 @@ def validate_resource(kind, config):
             raise HTTPException(422, 'Skill 配置只能包含字符串字段 content，请提交完整技能内容。')
         content = config['content']
         if len(content) > 64000:
-            raise HTTPException(422, 'Skill 完整内容（含 YAML 头部）不能超过 64000 个字符，请缩短正文或描述。')
+            raise HTTPException(422, 'Skill 完整内容（含自动生成的头部）不能超过 64000 个字符，请缩短内容文字或用途说明。')
         match = re.match(r'\A---\r?\n(.*?)\r?\n---(?:\r?\n|$)', content, re.S)
         try:
             front = yaml.safe_load(match.group(1)) if match else None
         except yaml.YAMLError:
             front = None
         if not isinstance(front, dict) or not all(isinstance(front.get(k), str) and front[k].strip() for k in ('name', 'description')):
-            raise HTTPException(422, 'Skill 需要有效的 YAML 头部：首行和结束行使用 ---，并包含非空字符串 name 和 description；纯数字请加双引号。只有正文时，请选择“正文”模式并填写名称和描述。')
+            raise HTTPException(422, 'Skill 内容缺少有效的头部（name 和 description）。请在页面里直接填写技能名称、用途说明和内容文字，系统会自动生成头部；通过接口提交时，头部需以 --- 开始并以 --- 结束。')
         if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', front['name']) or len(front['name']) > 64:
-            raise HTTPException(422, 'Skill 头部 name 须为 1–64 个小写字母、数字或单连字符，不能以连字符开头或结尾；中文资源名称请使用“正文”模式自动生成技术标识。')
+            raise HTTPException(422, 'Skill 头部的 name 须为 1–64 个小写字母、数字或单连字符，不能以连字符开头或结尾。在页面里填写技能名称时，中文名称会自动换成合规的技术标识。')
     else:
         if not set(config) <= {'url', 'headers'} or not isinstance(config.get('url'), str):
             raise HTTPException(422, 'MCP supports only url and headers; stdio is forbidden')
@@ -75,7 +75,7 @@ def resource_out(resource, actor):
             config['headers'] = {key: '***' for key in config.get('headers', {})}
     elif resource.kind == 'skill':
         config = {'content': resource.config.get('content', '')}
-    return {key: getattr(resource, key) for key in ('id', 'name', 'kind', 'description', 'org_id', 'enabled')} | {'config': config}
+    return {key: getattr(resource, key) for key in ('id', 'name', 'kind', 'description', 'org_id', 'team_id', 'enabled')} | {'config': config}
 
 
 def lock_group(db, identifier):
@@ -172,11 +172,13 @@ def build_payload(db, run, check_attachments=True):
     resources = policy.effective_resources(db, user, conversation)
     skills, mcps = [], []
     for resource in resources:
-        validate_resource(resource.kind, resource.config)
+        # Header secrets are stored encrypted: open them first, then validate what the runner will really receive.
+        config = resource_secrets.reveal_config(resource.kind, resource.config)
+        validate_resource(resource.kind, config)
         if resource.kind == 'skill':
-            skills.append({'name': resource.id, 'content': resource.config['content']})
+            skills.append({'name': resource.id, 'content': config['content']})
         else:
-            mcps.append({'name': resource.id, 'url': resource.config['url'], 'headers': resource.config.get('headers', {})})
+            mcps.append({'name': resource.id, 'url': config['url'], 'headers': config.get('headers', {})})
     message = db.get(Message, run.message_id)
     history = list(db.scalars(select(Message).where(Message.conversation_id == conversation.id,
         Message.created_at <= message.created_at).order_by(Message.created_at.desc(), Message.id.desc()).limit(40)))
@@ -236,7 +238,11 @@ def execute_run(run_id):
         if not isinstance(result.get('text'), str) or not result['text'].strip():
             raise RuntimeError('Runner returned no text')
         with SessionLocal.begin() as db:
-            run = db.get(Run, run_id)
+            run = db.get(Run, run_id, with_for_update=True)
+            if run.status != 'running':
+                # Cancelled (e.g. via /stop) while executing: discard the answer, never deliver it.
+                audit(db, db.get(User, run.user_id), 'run.result_discarded', run.id, {'status': run.status})
+                return
             # Recheck state and grants before persisting an answer generated with those resources.
             current = build_payload(db, run)
             if current['skills'] != payload['skills'] or current['mcps'] != payload['mcps']:
@@ -253,14 +259,33 @@ def execute_run(run_id):
         elif isinstance(exc, RuntimeError):
             error = str(exc)
         log.warning('Run %s failed (%s)', run_id, type(exc).__name__)
+        failed = False
         with SessionLocal.begin() as db:
             run = db.get(Run, run_id)
             if run and run.status == 'running':
                 run.status, run.error = 'failed', error
                 audit(db, db.get(User, run.user_id), 'run.failed', run.id, {'error': error})
+                failed = True
+        if failed:
+            # IM senders otherwise see silence; the notice carries no upstream detail.
+            deliver(run_id, failure_notice(error))
     finally:
         from .im_reactions import process
         process(run_id)
+
+
+FAILURE_REASONS = {
+    'Runner execution failed; check runner configuration and logs': '执行服务暂时不可用',
+    'Execution permission or resource validation failed': '权限或能力校验未通过',
+    'Resource grants changed during execution': '执行期间授权发生了变化',
+    'Runner returned no text': '模型没有返回内容',
+    'Runner response exceeded limit': '回复内容超过上限',
+}
+
+
+def failure_notice(error):
+    reason = FAILURE_REASONS.get(error) or (error if error and not error.isascii() and len(error) <= 60 else '处理异常')
+    return f'本次处理失败：{reason}。请稍后重新发送；如持续失败请联系管理员。'
 
 
 def deliver(run_id, reply):

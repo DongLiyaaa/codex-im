@@ -7,7 +7,7 @@ import time
 from collections import OrderedDict
 from fastapi import Depends, HTTPException, Request
 from .db import get_db
-from .models import SessionToken, User, now
+from .models import LOCKED_PASSWORD, SessionToken, User, now
 
 
 def session_secret():
@@ -24,6 +24,8 @@ def hash_password(password):
 
 
 def verify_password(password, encoded):
+    if encoded == LOCKED_PASSWORD:
+        return False
     try:
         salt, digest = encoded.split(':')
         actual = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1)
@@ -36,7 +38,7 @@ def token_hash(token):
     return hmac.new(session_secret().encode(), token.encode(), hashlib.sha256).hexdigest()
 
 
-def current_user(request: Request, db=Depends(get_db)):
+def current_user(request: Request, db=Depends(get_db, scope='function')):
     token = request.cookies.get('hub_session', '')
     session = db.get(SessionToken, token_hash(token)) if token else None
     if not session or session.expires_at <= now():
@@ -51,11 +53,11 @@ _lock = threading.Lock()
 _attempts = OrderedDict()
 
 
-def rate_limit(key):
+def rate_limit(key, limit=10):
     moment = time.monotonic()
     with _lock:
         entries = [t for t in _attempts.pop(key, []) if moment - t < 60]
-        if len(entries) >= 10:
+        if len(entries) >= limit:
             _attempts[key] = entries
             raise HTTPException(429, 'Too many login attempts', headers={'Retry-After': '60'})
         _attempts[key] = entries + [moment]

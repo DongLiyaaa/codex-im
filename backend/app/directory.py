@@ -51,7 +51,7 @@ def catalog(db, actor):
 
 
 @router.get('')
-def directory(actor=Depends(current_user), db=Depends(get_db)):
+def directory(actor=Depends(current_user), db=Depends(get_db, scope='function')):
     return catalog(db, actor)
 
 
@@ -64,7 +64,7 @@ class CreateDepartment(CreateName):
 
 
 @router.post('/organizations', status_code=201)
-def create_organization(body: CreateName, actor=Depends(current_user), db=Depends(get_db)):
+def create_organization(body: CreateName, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     policy.require(actor.active and actor.role == 'super_admin')
     row = Organization(name=body.name)
     db.add(row)
@@ -74,7 +74,7 @@ def create_organization(body: CreateName, actor=Depends(current_user), db=Depend
 
 
 @router.post('/departments', status_code=201)
-def create_department(body: CreateDepartment, actor=Depends(current_user), db=Depends(get_db)):
+def create_department(body: CreateDepartment, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     policy.require(actor.active and (actor.role == 'super_admin' or
         (actor.role == 'org_admin' and actor.org_id == body.org_id)))
     validate_scope(db, body.org_id, None)
@@ -113,7 +113,7 @@ def manageable(actor, row, deleting=False):
 
 
 @router.get('/management')
-def management(actor=Depends(current_user), db=Depends(get_db)):
+def management(actor=Depends(current_user), db=Depends(get_db, scope='function')):
     policy.require(actor.active and actor.role in ('super_admin', 'org_admin'))
     result = catalog(db, actor)
     for kind, model in [('organizations', Organization), ('departments', Department)]:
@@ -137,7 +137,7 @@ def directory_row(db, actor, kind, identifier, deleting=False):
 
 
 @router.patch('/{kind}/{identifier}')
-def rename(kind: str, identifier: str, body: CreateName, actor=Depends(current_user), db=Depends(get_db)):
+def rename(kind: str, identifier: str, body: CreateName, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     row = directory_row(db, actor, kind, identifier)
     old_name = row.name
     row.name = body.name
@@ -147,7 +147,7 @@ def rename(kind: str, identifier: str, body: CreateName, actor=Depends(current_u
 
 
 @router.delete('/{kind}/{identifier}')
-def remove(kind: str, identifier: str, actor=Depends(current_user), db=Depends(get_db)):
+def remove(kind: str, identifier: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     row = directory_row(db, actor, kind, identifier, True)
     references = [(User, User.team_id), (Group, Group.team_id)] if isinstance(row, Department) else [
         (Department, Department.org_id), (User, User.org_id), (Group, Group.org_id), (Resource, Resource.org_id)]

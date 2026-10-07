@@ -1,4 +1,23 @@
 name: codex-hub-v1
+
+# Everything here is self-contained: its own PostgreSQL container, networks and volumes. It never joins an existing
+# network, mounts an existing volume or talks to another project's database.
+x-attachment-limits: &attachment_limits
+  ATTACHMENT_MAX_BYTES: ${ATTACHMENT_MAX_BYTES:-20971520}
+  ATTACHMENT_MAX_FILES: ${ATTACHMENT_MAX_FILES:-5}
+  ATTACHMENT_DRAFT_HOURS: ${ATTACHMENT_DRAFT_HOURS:-24}
+  ATTACHMENT_PARSE_SECONDS: ${ATTACHMENT_PARSE_SECONDS:-45}
+  ATTACHMENT_LEASE_SECONDS: ${ATTACHMENT_LEASE_SECONDS:-180}
+  ATTACHMENT_MAX_ATTEMPTS: ${ATTACHMENT_MAX_ATTEMPTS:-3}
+  ATTACHMENT_IMAGE_PIXELS: ${ATTACHMENT_IMAGE_PIXELS:-25000000}
+  ATTACHMENT_ZIP_ENTRIES: ${ATTACHMENT_ZIP_ENTRIES:-2000}
+  ATTACHMENT_ZIP_EXPANDED_BYTES: ${ATTACHMENT_ZIP_EXPANDED_BYTES:-67108864}
+  ATTACHMENT_CELLS: ${ATTACHMENT_CELLS:-100000}
+  ATTACHMENT_PDF_PAGES: ${ATTACHMENT_PDF_PAGES:-200}
+  ATTACHMENT_DINGTALK_DOWNLOAD_DOMAINS: ${ATTACHMENT_DINGTALK_DOWNLOAD_DOMAINS:-dingtalk.com,dingtalkapps.com,alicdn.com,aliyuncs.com}
+  # 0 keeps parsing fail-closed: only macOS enforces "no network" for the parser, a container does not.
+  ATTACHMENT_ALLOW_PROCESS_ONLY: ${ATTACHMENT_ALLOW_PROCESS_ONLY:-0}
+
 services:
   db:
     image: postgres:16.14-bookworm
@@ -19,11 +38,13 @@ services:
     mem_limit: 768m
     cpus: 1
   api:
+    image: codex-hub-v1-api:amd64-local
     build:
       context: .
       dockerfile: Dockerfile
     platform: linux/amd64
     environment:
+      <<: *attachment_limits
       DATABASE_URL: postgresql+psycopg://hub:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/hub
       SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
@@ -31,6 +52,13 @@ services:
       APP_ORIGIN: ${APP_ORIGIN:-http://127.0.0.1:18200}
       RUNNER_URL: http://runner:8081
       RUNNER_TOKEN: ${RUNNER_TOKEN:?Set RUNNER_TOKEN}
+      PLATFORM_BRIDGE_KEY: ${PLATFORM_BRIDGE_KEY:-}
+      PLATFORM_AUTH_KEY: ${PLATFORM_AUTH_KEY:-}
+      IM_CONFIG_KEY: ${IM_CONFIG_KEY:-}
+      PLATFORM_FEISHU_CLIENT_ID: ${PLATFORM_FEISHU_CLIENT_ID:-}
+      PLATFORM_FEISHU_CLIENT_SECRET: ${PLATFORM_FEISHU_CLIENT_SECRET:-}
+      PLATFORM_DINGTALK_CLIENT_ID: ${PLATFORM_DINGTALK_CLIENT_ID:-}
+      PLATFORM_DINGTALK_CLIENT_SECRET: ${PLATFORM_DINGTALK_CLIENT_SECRET:-}
       FEISHU_TRANSPORT: ${FEISHU_TRANSPORT:-webhook}
       DINGTALK_TRANSPORT: ${DINGTALK_TRANSPORT:-webhook}
       DINGTALK_CLIENT_ID: ${DINGTALK_CLIENT_ID:-}
@@ -44,20 +72,64 @@ services:
       DINGTALK_ROBOT_ACCESS_TOKEN: ${DINGTALK_ROBOT_ACCESS_TOKEN:-}
       DINGTALK_ROBOT_SECRET: ${DINGTALK_ROBOT_SECRET:-}
       DINGTALK_ROBOT_CHAT_ID: ${DINGTALK_ROBOT_CHAT_ID:-}
-    ports: ['127.0.0.1:18200:18200']
+    ports: ['${HUB_BIND:-127.0.0.1}:${HUB_PORT:-18200}:18200']
+    volumes:
+      - hub_attachments:/data/attachments
     networks: [hub_data, hub_runner, hub_egress]
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      # The API creates and migrates the business tables on startup; the worker and IM processes wait for this.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18200/api/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     read_only: true
-    tmpfs: [/tmp:size=64m,mode=1777]
+    # The official CLIs run with a throwaway HOME under /tmp for every call.
+    tmpfs: ['/tmp:size=128m,mode=1777']
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
     mem_limit: 768m
     cpus: 1
+  attachments:
+    # Same image as the API; parsing never runs inside the API or the IM processes.
+    image: codex-hub-v1-api:amd64-local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    command: [python, -m, app.attachment_worker]
+    environment:
+      <<: *attachment_limits
+      DATABASE_URL: postgresql+psycopg://hub:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/hub
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
+      IM_CONFIG_KEY: ${IM_CONFIG_KEY:-}
+    volumes:
+      - hub_attachments:/data/attachments
+    networks: [hub_data, hub_egress]
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs: ['/tmp:size=64m,mode=1777']
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1
+    pids_limit: 128
   im-feishu:
     profiles: [im]
+    image: codex-hub-v1-api:amd64-local
     build:
       context: .
       dockerfile: Dockerfile
@@ -65,6 +137,8 @@ services:
     command: [python, -m, app.im_connections, --provider, feishu]
     environment:
       DATABASE_URL: postgresql+psycopg://hub:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/hub
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
+      IM_CONFIG_KEY: ${IM_CONFIG_KEY:-}
       FEISHU_TRANSPORT: ${FEISHU_TRANSPORT:-webhook}
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
@@ -72,8 +146,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      api:
+        condition: service_healthy
     read_only: true
-    tmpfs: [/tmp:size=32m,mode=1777]
+    tmpfs: ['/tmp:size=32m,mode=1777']
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: on-failure
@@ -82,6 +158,7 @@ services:
     pids_limit: 64
   im-dingtalk:
     profiles: [im]
+    image: codex-hub-v1-api:amd64-local
     build:
       context: .
       dockerfile: Dockerfile
@@ -89,6 +166,8 @@ services:
     command: [python, -m, app.im_connections, --provider, dingtalk]
     environment:
       DATABASE_URL: postgresql+psycopg://hub:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/hub
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
+      IM_CONFIG_KEY: ${IM_CONFIG_KEY:-}
       DINGTALK_TRANSPORT: ${DINGTALK_TRANSPORT:-webhook}
       DINGTALK_CLIENT_ID: ${DINGTALK_CLIENT_ID:-}
       DINGTALK_CLIENT_SECRET: ${DINGTALK_CLIENT_SECRET:-}
@@ -97,8 +176,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      api:
+        condition: service_healthy
     read_only: true
-    tmpfs: [/tmp:size=32m,mode=1777]
+    tmpfs: ['/tmp:size=32m,mode=1777']
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: on-failure
@@ -106,6 +187,7 @@ services:
     cpus: 0.5
     pids_limit: 64
   runner:
+    image: codex-hub-v1-runner:amd64-local
     build:
       context: ./runner
       dockerfile: Dockerfile
@@ -117,9 +199,15 @@ services:
       CODEX_OAUTH_AUTH_FILE: ${CODEX_OAUTH_AUTH_FILE:-}
       # Optional OAuth: mount only its dedicated writable directory (see README).
       CODEX_MODEL: ${CODEX_MODEL:-}
+      # Optional OpenAI-compatible endpoint (plain public https only); needs CODEX_AUTH_MODE=api and the key above.
+      CODEX_BASE_URL: ${CODEX_BASE_URL:-}
+      # Optional model egress proxy, e.g. http://host.docker.internal:7890; the two bridges below always stay direct.
+      CODEX_PROXY_URL: ${CODEX_PROXY_URL:-}
+      PLATFORM_BRIDGE_URL: http://api:18200/internal/platform-mcp
+      ATTACHMENT_BRIDGE_URL: http://api:18200/internal/attachment-mcp
     networks: [hub_runner, hub_egress]
     read_only: true
-    tmpfs: [/tmp:size=512m,mode=1777]
+    tmpfs: ['/tmp:size=512m,mode=1777']
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
@@ -134,3 +222,4 @@ networks:
   hub_egress: {}
 volumes:
   hub_pgdata: {}
+  hub_attachments: {}
