@@ -1,9 +1,12 @@
 """把部署配置里的模型 API Key 换成新的；新 Key 不会出现在命令行、日志或聊天里。
 
-    python3 scripts/rotate_model_key.py              轮换 .env.docker 里的 OPENAI_API_KEY
+    python3 scripts/rotate_model_key.py                          轮换 .env.docker 里的 OPENAI_API_KEY
     python3 scripts/rotate_model_key.py .env.<名称>
+    python3 scripts/rotate_model_key.py --key-file 文件          新 Key 从私有文件读取，成功后删除该文件
 
-先在模型服务商的控制台生成新 Key，再运行本脚本，在隐藏提示里粘贴。脚本依次：
+先在模型服务商的控制台生成新 Key，再运行本脚本，在隐藏提示里粘贴；或者让别人（如协助的 Agent）代为执行：
+先 `umask 077; pbpaste > 文件`（Key 直接从剪贴板进文件，不经过聊天或命令行参数），再用 --key-file 指定它。
+密钥文件必须是属于当前用户、不可被组或其他人访问的普通文件（不能是符号链接），且不超过 512 字节。脚本依次：
 1. 用新 Key 请求配置的端点 /models，确认可用（配置的模型在列表里）后才写文件；
 2. 原子地改写配置文件（权限 0600，其余内容原样保留）；
 3. 再用旧 Key 请求一次，确认服务商已经拒绝它。
@@ -14,6 +17,7 @@ import getpass
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import urllib.error
@@ -26,6 +30,8 @@ KEY_NAME = 'OPENAI_API_KEY'
 KEY_FORMAT = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{15,199}')
 DEFAULT_ENDPOINT = 'https://api.openai.com/v1'
 REFUSED = (401, 403)
+KEY_FILE_LIMIT = 512
+USAGE = '用法：rotate_model_key.py [.env 或 .env.<名称>] [--key-file 文件]'
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -94,11 +100,47 @@ def write_private(path, text):
         raise
 
 
+def read_key_file(path):
+    """The new key from a private file the operator created, so it never passes through chat or an argument."""
+    try:
+        # O_NOFOLLOW refuses a symlink; O_NONBLOCK keeps a FIFO from hanging the open (it is rejected below).
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+    except OSError:
+        raise SystemExit('密钥文件不存在、是符号链接或无法读取。') from None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise SystemExit('密钥文件必须是普通文件。')
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise SystemExit('密钥文件必须属于当前用户，且不能被组或其他人访问（chmod 600）。')
+        data = os.read(descriptor, KEY_FILE_LIMIT + 1)
+    finally:
+        os.close(descriptor)
+    if len(data) > KEY_FILE_LIMIT:
+        raise SystemExit('密钥文件过大，应只包含一个 Key。')
+    try:
+        return data.decode('utf-8')
+    except UnicodeDecodeError:
+        raise SystemExit('密钥文件不是文本。') from None
+
+
+def parse(args):
+    name, key_file, rest = None, None, list(args)
+    while rest:
+        item = rest.pop(0)
+        if item == '--key-file' and key_file is None and rest:
+            key_file = rest.pop(0)
+        elif name is None and not item.startswith('-'):
+            name = item
+        else:
+            raise SystemExit(USAGE)
+    return name or '.env.docker', key_file
+
+
 def main(argv=None, root=ROOT, ask=getpass.getpass, check=probe, out=print):
-    args = list(sys.argv[1:] if argv is None else argv)
-    name = args[0] if args else '.env.docker'
-    if len(args) > 1 or not NAME.fullmatch(name) or name == '.env.example':
-        raise SystemExit('用法：rotate_model_key.py [.env 或 .env.<名称>]')
+    name, key_file = parse(sys.argv[1:] if argv is None else argv)
+    if not NAME.fullmatch(name) or name == '.env.example':
+        raise SystemExit(USAGE)
     path = root / name
     if not path.is_file():
         raise SystemExit(f'{name} 不存在。')
@@ -110,7 +152,7 @@ def main(argv=None, root=ROOT, ask=getpass.getpass, check=probe, out=print):
     values = read_values(text)
     old, model, endpoint = values[KEY_NAME], values.get('CODEX_MODEL', '').strip() or None, endpoint_of(values)
     proxy = proxy_of(values)
-    new = ask('新的 API Key（输入不会显示）：').strip()
+    new = (read_key_file(key_file) if key_file is not None else ask('新的 API Key（输入不会显示）：')).strip()
     if not KEY_FORMAT.fullmatch(new):
         out('新 Key 的格式不对（只允许字母、数字和 . _ -，16–200 位，不含空格或引号）。未修改任何文件。')
         return 2
@@ -125,6 +167,13 @@ def main(argv=None, root=ROOT, ask=getpass.getpass, check=probe, out=print):
     lines[positions[0]] = f'{KEY_NAME}={new}'
     write_private(path, '\n'.join(lines) + '\n')
     out(f'新 Key 验证通过（HTTP 200），已写入 {name}（权限 0600）。')
+    if key_file is not None:
+        # The key now lives in the configuration file; do not leave a second plaintext copy behind.
+        try:
+            os.unlink(key_file)
+            out('已删除密钥文件。')
+        except OSError:
+            out('警告：无法删除密钥文件，请手动删除它。')
     status, _ = check(endpoint, old, model, proxy)
     if status in REFUSED:
         out(f'旧 Key 已被服务商拒绝（HTTP {status}），吊销已生效。')

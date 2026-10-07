@@ -284,7 +284,7 @@ def test_skill_body_create_without_overwriting_existing(env):
     payload['config']['content'] = '---\nname: test1\ndescription: 111\n---\n111'
     rejected = auth('admin').post('/api/resources', json=payload)
     assert rejected.status_code == 422
-    assert '纯数字请加双引号' in rejected.json()['detail']
+    assert '缺少有效的头部' in rejected.json()['detail']
 
 
 

@@ -1,5 +1,6 @@
 """Model key rotation: the new key is proven before it is written, the old one is proven dead, and no key is ever printed."""
 import importlib.util
+import os
 import stat
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,8 +42,11 @@ class Run:
         self.proxies.append(proxy)
         return self.answers.get(key, (None, None))
 
-    def __call__(self, name='.env.docker'):
-        code = rotate.main([name], self.root, ask=lambda _: self.typed, check=self.check, out=self.lines.append)
+    def __call__(self, name='.env.docker', *extra):
+        def refuse_prompt(_):
+            raise AssertionError('a key file must never fall back to the prompt')
+        ask = refuse_prompt if '--key-file' in extra else (lambda _: self.typed)
+        code = rotate.main([name, *extra], self.root, ask=ask, check=self.check, out=self.lines.append)
         return code, '\n'.join(self.lines)
 
 
@@ -240,3 +244,88 @@ def test_the_configured_proxy_is_passed_to_every_check_and_a_socks_proxy_is_refu
     with pytest.raises(SystemExit):
         refused()
     assert refused.calls == [] and OLD in (root / '.env.docker').read_text()
+
+
+# ---- the key from a private file -------------------------------------------------------------------------------
+
+def key_file(root, content=NEW + '\n', mode=0o600, name='new-key'):
+    path = root / name
+    path.write_bytes(content if isinstance(content, bytes) else content.encode())
+    path.chmod(mode)
+    return path
+
+
+def test_a_key_file_is_read_used_and_removed_without_the_key_being_printed(root):
+    path = key_file(root)
+    run = Run(root, {NEW: (200, True), OLD: (401, None)})
+    code, output = run('.env.docker', '--key-file', str(path))
+    assert code == 0 and (root / '.env.docker').read_text() == env_text(old=NEW)
+    assert not path.exists() and '已删除密钥文件' in output
+    assert OLD not in output and NEW not in output and str(path) not in output
+    assert [call[1] for call in run.calls] == [NEW, OLD]
+
+
+def test_the_file_is_removed_even_when_the_old_key_is_still_valid(root):
+    path = key_file(root)
+    code, output = Run(root, {NEW: (200, True), OLD: (200, True)})('.env.docker', '--key-file', str(path))
+    assert code == 3 and not path.exists() and '旧 Key 仍然有效' in output
+
+
+def test_a_key_that_does_not_work_leaves_the_file_for_a_retry(root):
+    path = key_file(root)
+    code, _ = Run(root, {NEW: (401, None)})('.env.docker', '--key-file', str(path))
+    assert code == 2 and path.exists() and (root / '.env.docker').read_text() == env_text()
+
+
+def test_the_option_may_come_before_the_file_name_and_the_default_target_is_env_docker(root):
+    path = key_file(root)
+    run = Run(root, {NEW: (200, True), OLD: (401, None)})
+    code = rotate.main(['--key-file', str(path)], root, ask=None, check=run.check, out=run.lines.append)
+    assert code == 0 and (root / '.env.docker').read_text() == env_text(old=NEW)
+
+
+@pytest.mark.parametrize('mode', [0o644, 0o640, 0o604, 0o666, 0o660])
+def test_a_key_file_other_people_can_read_is_refused_and_kept(root, mode):
+    path = key_file(root, mode=mode)
+    run = Run(root, {NEW: (200, True)})
+    with pytest.raises(SystemExit) as refused:
+        run('.env.docker', '--key-file', str(path))
+    assert run.calls == [] and path.exists() and (root / '.env.docker').read_text() == env_text()
+    assert NEW not in str(refused.value)
+
+
+def test_a_symlink_a_directory_a_missing_file_and_a_fifo_are_refused(root):
+    real = key_file(root)
+    link = root / 'link'
+    link.symlink_to(real)
+    directory = root / 'folder'
+    directory.mkdir(mode=0o700)
+    fifo = root / 'pipe'
+    os.mkfifo(fifo, 0o600)
+    for target in (link, directory, root / 'absent', fifo):
+        run = Run(root, {NEW: (200, True)})
+        with pytest.raises(SystemExit):
+            run('.env.docker', '--key-file', str(target))
+        assert run.calls == [] and (root / '.env.docker').read_text() == env_text()
+    assert real.exists()
+
+
+@pytest.mark.parametrize('content', [b'', b'\n', b'x' * 513, (NEW + '\n' + NEW + '\n').encode(), (NEW + ' ' + NEW).encode(),
+                                     b'\xff\xfe', ("'" + NEW + "'").encode()])
+def test_a_key_file_with_the_wrong_content_changes_nothing(root, content):
+    path = key_file(root, content)
+    run = Run(root, {NEW: (200, True)})
+    try:
+        code, _ = run('.env.docker', '--key-file', str(path))
+        assert code == 2
+    except SystemExit:
+        pass
+    assert run.calls == [] and path.exists() and (root / '.env.docker').read_text() == env_text()
+
+
+@pytest.mark.parametrize('args', [('--key-file',), ('--key-file', 'a', '--key-file', 'b'), ('--unknown',), ('.env.docker', '.env.other'),
+                                  ('--key-file', '--key-file'), ('-k', 'x')])
+def test_malformed_command_lines_are_refused(root, args):
+    with pytest.raises(SystemExit):
+        rotate.main(list(args), root, ask=lambda _: NEW, check=lambda *a: (200, True), out=lambda _: None)
+    assert (root / '.env.docker').read_text() == env_text()

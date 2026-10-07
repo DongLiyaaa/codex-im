@@ -1,0 +1,29 @@
+name: codex-hub-v1-test
+
+# Throwaway PostgreSQL for the backend tests only, started and removed by scripts/test_backend.sh.
+# Its own project, network and container; data lives in tmpfs (no volume), and the host port is picked by Docker
+# from the free ephemeral range, so it can never take a port another service already uses (1panel 55432, the
+# native 55439, the Hub on 18210, ...). The image is the one the Hub database already uses and is never pulled.
+services:
+  db:
+    image: postgres:16.14-bookworm
+    platform: linux/amd64
+    pull_policy: never
+    environment:
+      POSTGRES_USER: hub_test
+      POSTGRES_DB: agent_hub_test
+      POSTGRES_PASSWORD: ${HUB_TEST_DB_PASSWORD:?Set HUB_TEST_DB_PASSWORD}
+    # WAL lives in the same 512 MB tmpfs; the default max_wal_size (1 GB) let a full suite run fill it (DiskFull).
+    command: [postgres, -c, max_wal_size=96MB, -c, min_wal_size=32MB, -c, fsync=off, -c, synchronous_commit=off, -c, full_page_writes=off]
+    ports:
+      - 127.0.0.1::5432
+    tmpfs:
+      - /var/lib/postgresql/data:size=512m
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U hub_test -d agent_hub_test']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: 'no'
+    mem_limit: 512m
+    cpus: 1

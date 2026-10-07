@@ -13,13 +13,13 @@ from sqlalchemy.exc import IntegrityError
 from .db import engine, SessionLocal, get_db
 from .models import Base, User, Group, Resource, Binding, Conversation, Message, Run, Audit, Identity, SessionToken, now
 from .security import current_user, hash_password, verify_password, token_hash, session_secret, rate_limit
-from . import policy, schemas, service, im_settings
+from . import policy, resource_secrets, schemas, service, im_settings
 
 
 @asynccontextmanager
 async def lifespan(app):
     session_secret()
-    Base.metadata.create_all(engine, tables=[table for table in Base.metadata.sorted_tables if table.name not in ('im_reactions', 'organizations', 'departments', 'platform_settings', 'platform_auth_jobs', 'platform_auth_requests', 'im_chat_names', 'im_outbox', 'platform_approvals', 'im_onboarding_policies')])
+    Base.metadata.create_all(engine, tables=[table for table in Base.metadata.sorted_tables if table.name not in ('im_reactions', 'organizations', 'departments', 'platform_settings', 'platform_auth_jobs', 'platform_auth_requests', 'im_chat_names', 'im_outbox', 'platform_approvals', 'im_onboarding_policies', 'resource_departments', 'platform_access')])
     from .im_migrations import migrate
     migrate(engine)
     with SessionLocal.begin() as db:
@@ -157,15 +157,19 @@ def me(actor=Depends(current_user)):
     return actor
 
 
-def user_out(actor, user):
+def user_out(actor, user, channels=None):
     result = schemas.UserOut.model_validate(user)
     result.can_manage = policy.can_manage_user(actor, user)
+    result.im_channels = sorted((channels or {}).get(user.id, ()))
     return result
 
 
 @app.get('/api/users', response_model=list[schemas.UserOut])
 def users(actor=Depends(current_user), db=Depends(get_db, scope='function')):
-    return [user_out(actor, u) for u in db.scalars(select(User)) if u.id == actor.id or policy.can_manage_user(actor, u)]
+    channels = {}
+    for user_id, provider in db.execute(select(Identity.user_id, Identity.provider)):
+        channels.setdefault(user_id, set()).add(provider)
+    return [user_out(actor, u, channels) for u in db.scalars(select(User)) if u.id == actor.id or policy.can_manage_user(actor, u)]
 
 
 @app.post('/api/users', response_model=schemas.UserOut, status_code=201)
@@ -253,32 +257,118 @@ def create_group(body: schemas.GroupCreate, actor=Depends(current_user), db=Depe
 
 
 def visible_resources(db, actor):
-    granted = set(db.scalars(select(Binding.resource_id).where(Binding.subject_type == 'user', Binding.subject_id == actor.id)))
+    granted = policy.granted_ids(db, policy.subject_keys(db, actor, 'user'))
     return [r for r in db.scalars(select(Resource)) if policy.can_manage_resource(actor, r) or
-        (r.enabled and r.id in granted and (r.org_id is None or r.org_id == actor.org_id))]
+        (r.enabled and r.id in granted and policy.in_resource_scope(r, actor.org_id, actor.team_id))]
+
+
+def resource_grants(db, resource):
+    # Shown to the resource's administrators: a resource that nobody was granted is never used, whatever its scope.
+    return [{'subject_type': b.subject_type, 'subject_id': b.subject_id}
+            for b in db.scalars(select(Binding).where(Binding.resource_id == resource.id).order_by(Binding.subject_type))]
+
+
+def managed_out(db, resource, actor):
+    result = service.resource_out(resource, actor)
+    if result['can_manage']:
+        result['grants'] = resource_grants(db, resource)
+    return result
 
 
 @app.get('/api/resources')
 def resources(actor=Depends(current_user), db=Depends(get_db, scope='function')):
-    return [service.resource_out(r, actor) for r in visible_resources(db, actor)]
+    return [managed_out(db, r, actor) for r in visible_resources(db, actor)]
+
+
+def grant_to_scope(db, actor, resource):
+    """Grants a resource to everyone in its own scope: its department, or else its whole organization."""
+    if not resource.org_id:
+        raise HTTPException(400, '全局资源没有可整体授权的组织或部门，请到「绑定与授权」逐个授权。')
+    kind, subject_id = ('team', resource.team_id) if resource.team_id else ('org', resource.org_id)
+    if db.scalar(select(Binding.id).where(Binding.subject_type == kind, Binding.subject_id == subject_id,
+                                          Binding.resource_id == resource.id)):
+        return None
+    binding = Binding(subject_type=kind, subject_id=subject_id, resource_id=resource.id)
+    if policy.binding_subject(db, binding) is None:
+        raise HTTPException(400, '该组织或部门不在目录中，无法整体授权，请到「绑定与授权」逐个授权。')
+    policy.require(policy.can_manage_binding(db, actor, binding))
+    db.add(binding)
+    db.flush()
+    service.audit(db, actor, 'binding.create', binding.id, {'source': 'resource_scope', 'subject_type': kind})
+    return binding.id
 
 
 @app.post('/api/resources', status_code=201)
 def create_resource(body: schemas.ResourceCreate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     from .directory import validate_scope
-    validate_scope(db, body.org_id, None)
-    resource = Resource(**body.model_dump())
+    validate_scope(db, body.org_id, body.team_id)
+    values = body.model_dump()
+    resource = Resource(**{key: value for key, value in values.items() if key not in ('team_id', 'config', 'grant_scope')})
+    resource.team_id = body.team_id
     policy.require(policy.can_manage_resource(actor, resource))
     service.validate_resource(body.kind, body.config)
+    # Validated as typed, stored encrypted: a header secret is never kept in readable form.
+    resource.config = resource_secrets.seal_config(body.kind, body.config)
     db.add(resource)
     db.flush()
     service.audit(db, actor, 'resource.create', resource.id)
-    return service.resource_out(resource, actor)
+    if body.grant_scope:
+        grant_to_scope(db, actor, resource)
+    return managed_out(db, resource, actor)
+
+
+def get_resource(db, identifier):
+    return get_or_404(db, Resource, identifier)
+
+
+@app.patch('/api/resources/{identifier}')
+def update_resource(identifier: str, body: schemas.ResourceUpdate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
+    from .directory import validate_scope
+    resource = get_resource(db, identifier)
+    policy.require(policy.can_manage_resource(actor, resource))
+    validate_scope(db, body.org_id, body.team_id)
+    # A header still showing the mask is unchanged; validate it as an ordinary value.
+    plain = {**body.config, 'headers': {k: ('x' if v == resource_secrets.MASK else v) for k, v in body.config['headers'].items()}} \
+        if resource.kind == 'mcp' and isinstance(body.config.get('headers'), dict) else body.config
+    service.validate_resource(resource.kind, plain)
+    previous = {'org_id': resource.org_id, 'team_id': resource.team_id}
+    resource.name, resource.description, resource.org_id, resource.enabled = body.name, body.description, body.org_id, body.enabled
+    resource.team_id = body.team_id
+    policy.require(policy.can_manage_resource(actor, resource))
+    resource.config = resource_secrets.merge_config(resource.kind, body.config, resource.config)
+    revoked = []
+    if previous != {'org_id': resource.org_id, 'team_id': resource.team_id}:
+        # A grant must stay inside the resource's scope; narrowing the scope revokes the grants that fall outside it.
+        for binding in db.scalars(select(Binding).where(Binding.resource_id == resource.id)):
+            subject = policy.binding_subject(db, binding)
+            if not subject or not (policy.in_resource_scope(resource, subject.org_id, subject.team_id) or
+                                   (binding.subject_type == 'user' and subject.role == 'super_admin')):
+                revoked.append(binding.id)
+                db.delete(binding)
+    db.flush()
+    service.audit(db, actor, 'resource.update', resource.id, {'previous_scope': previous, 'revoked_bindings': revoked})
+    if body.grant_scope:
+        grant_to_scope(db, actor, resource)
+    return managed_out(db, resource, actor)
+
+
+@app.delete('/api/resources/{identifier}')
+def delete_resource(identifier: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
+    resource = get_resource(db, identifier)
+    policy.require(policy.can_manage_resource(actor, resource))
+    bindings = list(db.scalars(select(Binding).where(Binding.resource_id == resource.id)))
+    for binding in bindings:
+        db.delete(binding)
+    db.delete(resource)
+    db.flush()
+    service.audit(db, actor, 'resource.delete', identifier, {'name': resource.name, 'kind': resource.kind, 'revoked_bindings': len(bindings)})
+    return {'ok': True}
 
 
 @app.get('/api/bindings', response_model=list[schemas.BindingOut])
 def bindings(actor=Depends(current_user), db=Depends(get_db, scope='function')):
-    return [b for b in db.scalars(select(Binding)) if policy.can_manage_binding(db, actor, b) or (b.subject_type == 'user' and b.subject_id == actor.id)]
+    own = set(policy.subject_keys(db, actor, 'user'))
+    return [b for b in db.scalars(select(Binding)) if policy.can_manage_binding(db, actor, b) or (b.subject_type, b.subject_id) in own]
 
 
 @app.post('/api/bindings', response_model=schemas.BindingOut, status_code=201)
@@ -431,7 +521,17 @@ def audit_events(actor=Depends(current_user), db=Depends(get_db, scope='function
     query = select(Audit).order_by(Audit.created_at.desc()).limit(500)
     if actor.role != 'super_admin':
         query = query.where(Audit.actor_id.in_(allowed))
-    return [{key: getattr(a, key) for key in ('id', 'actor_id', 'action', 'target_id', 'details', 'created_at')} for a in db.scalars(query)]
+    return audit_items(db, actor, list(db.scalars(query)))
+
+
+AUDIT_FIELDS = ('id', 'actor_id', 'action', 'target_id', 'details', 'created_at')
+
+
+def audit_items(db, viewer, rows):
+    # `context` names the person (with their chat-platform nickname) and the chat; it never replaces the raw ids.
+    from .audit_context import describe
+    context = describe(db, viewer, rows)
+    return [{key: getattr(row, key) for key in AUDIT_FIELDS} | {'context': context[row.id]} for row in rows]
 
 
 @app.get('/api/audit/page')
@@ -451,11 +551,9 @@ def audit_page(page: int = Query(1, ge=1, le=2147483647), page_size: int = Query
     total = db.scalar(select(func.count()).select_from(query.subquery()))
     pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, pages)
-    rows = db.scalars(query.order_by(Audit.created_at.desc(), Audit.id.desc())
-                      .offset((page - 1) * page_size).limit(page_size))
-    return {'items': [{key: getattr(row, key) for key in
-            ('id', 'actor_id', 'action', 'target_id', 'details', 'created_at')} for row in rows],
-            'total': total, 'page': page, 'page_size': page_size, 'pages': pages}
+    rows = list(db.scalars(query.order_by(Audit.created_at.desc(), Audit.id.desc())
+                           .offset((page - 1) * page_size).limit(page_size)))
+    return {'items': audit_items(db, actor, rows), 'total': total, 'page': page, 'page_size': page_size, 'pages': pages}
 
 
 def platform_admin(actor=Depends(current_user)):
@@ -482,12 +580,12 @@ def integrations(actor=Depends(platform_admin), db=Depends(get_db, scope='functi
     for provider in ('feishu', 'dingtalk'):
         with im_settings.snapshot(db, provider) as values:
             config = im.configuration(provider)
-            if provider == 'feishu' and config['configured']:
+            if config['configured'] and (provider == 'feishu' or config['transport'] == 'stream'):
                 from .im_reactions import status
-                config['native_work_status'] = status(db)
+                config['native_work_status'] = status(db, provider)
             elif provider == 'dingtalk':
                 config['native_work_status'] = {'supported': False, 'state': 'unsupported',
-                    'message': '当前机器人官方接口未证实支持用户消息下的工作表情。卡片替代需单独配置与产品确认。'}
+                    'message': '钉钉工作表情只在长连接（Stream）模式下生效：Webhook 模式没有可回复的机器人消息接口。'}
         if config['configured'] and config['transport'] != 'webhook':
             row = db.get(IMConnection, provider)
             if row and row.transport == config['transport']:

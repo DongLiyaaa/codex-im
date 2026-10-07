@@ -15,7 +15,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, text, update
 from .db import engine, SessionLocal
 from .models import Audit, Conversation, Message, Run, User
-from . import policy, schemas
+from . import policy, resource_secrets, schemas
 
 log = logging.getLogger(__name__)
 WORKER_LOCK = 731940281
@@ -44,16 +44,16 @@ def validate_resource(kind, config):
             raise HTTPException(422, 'Skill 配置只能包含字符串字段 content，请提交完整技能内容。')
         content = config['content']
         if len(content) > 64000:
-            raise HTTPException(422, 'Skill 完整内容（含 YAML 头部）不能超过 64000 个字符，请缩短正文或描述。')
+            raise HTTPException(422, 'Skill 完整内容（含自动生成的头部）不能超过 64000 个字符，请缩短内容文字或用途说明。')
         match = re.match(r'\A---\r?\n(.*?)\r?\n---(?:\r?\n|$)', content, re.S)
         try:
             front = yaml.safe_load(match.group(1)) if match else None
         except yaml.YAMLError:
             front = None
         if not isinstance(front, dict) or not all(isinstance(front.get(k), str) and front[k].strip() for k in ('name', 'description')):
-            raise HTTPException(422, 'Skill 需要有效的 YAML 头部：首行和结束行使用 ---，并包含非空字符串 name 和 description；纯数字请加双引号。只有正文时，请选择“正文”模式并填写名称和描述。')
+            raise HTTPException(422, 'Skill 内容缺少有效的头部（name 和 description）。请在页面里直接填写技能名称、用途说明和内容文字，系统会自动生成头部；通过接口提交时，头部需以 --- 开始并以 --- 结束。')
         if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', front['name']) or len(front['name']) > 64:
-            raise HTTPException(422, 'Skill 头部 name 须为 1–64 个小写字母、数字或单连字符，不能以连字符开头或结尾；中文资源名称请使用“正文”模式自动生成技术标识。')
+            raise HTTPException(422, 'Skill 头部的 name 须为 1–64 个小写字母、数字或单连字符，不能以连字符开头或结尾。在页面里填写技能名称时，中文名称会自动换成合规的技术标识。')
     else:
         if not set(config) <= {'url', 'headers'} or not isinstance(config.get('url'), str):
             raise HTTPException(422, 'MCP supports only url and headers; stdio is forbidden')
@@ -75,7 +75,8 @@ def resource_out(resource, actor):
             config['headers'] = {key: '***' for key in config.get('headers', {})}
     elif resource.kind == 'skill':
         config = {'content': resource.config.get('content', '')}
-    return {key: getattr(resource, key) for key in ('id', 'name', 'kind', 'description', 'org_id', 'enabled')} | {'config': config}
+    return {key: getattr(resource, key) for key in ('id', 'name', 'kind', 'description', 'org_id', 'team_id', 'enabled')} | {
+        'config': config, 'can_manage': policy.can_manage_resource(actor, resource)}
 
 
 def lock_group(db, identifier):
@@ -96,7 +97,7 @@ def require_idle_group(db, identifier):
         raise HTTPException(409, '群组仍有待发送的回复，请完成后再修改或删除。')
     if db.scalar(select(IMReaction.event_id).join(IMEvent, IMEvent.id == IMReaction.event_id).where(
             IMEvent.run_id.in_(runs), IMReaction.state != 'cleared').limit(1)):
-        raise HTTPException(409, '群组飞书工作表情尚未清理，请完成后再修改或删除。')
+        raise HTTPException(409, '群组工作表情尚未清理，请完成后再修改或删除。')
 
 
 def lock_conversation(db, identifier):
@@ -120,7 +121,7 @@ def archive_conversation(db, actor, identifier):
     if db.scalar(select(IMReaction.event_id).join(IMEvent, IMEvent.id == IMReaction.event_id)
             .join(Run, Run.id == IMEvent.run_id).where(Run.conversation_id == identifier,
                 IMReaction.state != 'cleared').limit(1)):
-        raise HTTPException(409, '飞书工作表情尚未清理，请等待清理完成后再移除。')
+        raise HTTPException(409, '工作表情尚未清理，请等待清理完成后再移除。')
     conversation.archived_at, conversation.archived_by = now(), actor.id
     audit(db, actor, 'conversation.archive', identifier,
           {'group_id': conversation.group_id, 'owner_id': conversation.owner_id, 'history_retained': True})
@@ -172,11 +173,13 @@ def build_payload(db, run, check_attachments=True):
     resources = policy.effective_resources(db, user, conversation)
     skills, mcps = [], []
     for resource in resources:
-        validate_resource(resource.kind, resource.config)
+        # Header secrets are stored encrypted: open them first, then validate what the runner will really receive.
+        config = resource_secrets.reveal_config(resource.kind, resource.config)
+        validate_resource(resource.kind, config)
         if resource.kind == 'skill':
-            skills.append({'name': resource.id, 'content': resource.config['content']})
+            skills.append({'name': resource.id, 'content': config['content']})
         else:
-            mcps.append({'name': resource.id, 'url': resource.config['url'], 'headers': resource.config.get('headers', {})})
+            mcps.append({'name': resource.id, 'url': config['url'], 'headers': config.get('headers', {})})
     message = db.get(Message, run.message_id)
     history = list(db.scalars(select(Message).where(Message.conversation_id == conversation.id,
         Message.created_at <= message.created_at).order_by(Message.created_at.desc(), Message.id.desc()).limit(40)))
@@ -208,6 +211,13 @@ def execute_run(run_id):
             if os.getenv('PLATFORM_BRIDGE_KEY'):
                 from .platform_bridge import issue
                 payload['platform_capability'] = issue(run)
+                from .platform_bridge import channel_of, CHANNEL_NAMES
+                channel = channel_of(db, run)
+                if channel:
+                    other = CHANNEL_NAMES['dingtalk' if channel == 'feishu' else 'feishu']
+                    payload['prompt'] += (f'\n\n[渠道说明] 当前消息来自{CHANNEL_NAMES[channel]}。内置云文档能力只提供{CHANNEL_NAMES[channel]}的'
+                                          f'{"文档、表格和多维表格" if channel == "feishu" else "文档和表格（不支持多维表格）"}；'
+                                          f'不要声称或提供{other}的任何能力，询问能力时只介绍{CHANNEL_NAMES[channel]}。')
             from .attachments import run_attachments
             from .attachment_models import AttachmentArtifact
             attached = run_attachments(db, run)

@@ -18,6 +18,6 @@ export function NewMemberForm({ discoveryId, nickname, isGroup, initialScope, do
     <Field label="角色"><select value={role} onChange={e => setRole(e.target.value as Role)}>{memberRoles.map(r => <option key={r} value={r}>{roles[r]}</option>)}</select></Field>
     <ScopeFields scope={scope} change={setScope} requireTeam/>
     <p className="im-help">不创建邮箱和密码，成员只能通过飞书 / 钉钉使用；Skill / MCP 仍需在「绑定与授权」单独授权。</p>
-    {isGroup && <p className="im-help">该消息来自群聊：接入后，请到「协作群组 → 已发现群 / 待绑定」登记这个群。</p>}
+    {isGroup && <p className="im-help">该消息来自群聊：接入后，群尚未登记的，请在上方「已发现群 / 待绑定」登记；群已登记的，请再点一次「处理接入」，选择这位成员并确认加入群。</p>}
   </Form>;
 }

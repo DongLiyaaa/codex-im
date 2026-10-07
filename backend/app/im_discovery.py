@@ -133,10 +133,27 @@ def admin(actor=Depends(current_user)):
     return actor
 
 
+KINDS = ('private', 'group')
+
+
+def kind_filter(chat):
+    """None keeps every behaviour that predates the split (all rows, both kinds)."""
+    if chat is not None and chat not in KINDS:
+        raise HTTPException(422, 'chat must be private or group')
+    return chat
+
+
 @router.get('')
-def discoveries(actor=Depends(admin), db=Depends(get_db, scope='function')):
+def discoveries(actor=Depends(admin), db=Depends(get_db, scope='function'), chat: str | None = None):
+    # `chat` lets IM 集成 list private chats and 协作群组 list group chats; each page then gets its own newest 500.
+    chat = kind_filter(chat)
     result = []
-    rows = list(db.scalars(select(IMDiscovery).order_by(IMDiscovery.last_seen.desc()).limit(500)))
+    query = select(IMDiscovery)
+    if chat == 'group':
+        query = query.where(IMDiscovery.chat_type == 'group')
+    elif chat == 'private':
+        query = query.where(IMDiscovery.chat_type != 'group')
+    rows = list(db.scalars(query.order_by(IMDiscovery.last_seen.desc()).limit(500)))
     names = chat_names(db, rows)
     for row in rows:
         with im_settings.snapshot(db, row.provider):
@@ -168,12 +185,15 @@ def nickname_status(row):
 
 
 @router.post('/nicknames')
-def refresh_nicknames(actor=Depends(admin), db=Depends(get_db, scope='function')):
+def refresh_nicknames(actor=Depends(admin), db=Depends(get_db, scope='function'), chat: str | None = None):
+    # private: names of the people who wrote in private chats. group: names of group senders and of the groups.
+    # No `chat` keeps the original behaviour (both).
     from .im_nicknames import refresh
-    result = refresh(db)
-    service.audit(db, actor, 'im.discovery.nickname_refresh', 'feishu',
-                  {key: result[key] for key in ('status', 'resolved', 'unresolved', 'remaining',
-                                                'chat_resolved', 'chat_unresolved', 'chat_remaining')})
+    chat = kind_filter(chat)
+    result = refresh(db, kind=chat)
+    details = {key: result[key] for key in ('status', 'resolved', 'unresolved', 'remaining',
+                                            'chat_resolved', 'chat_unresolved', 'chat_remaining')}
+    service.audit(db, actor, 'im.discovery.nickname_refresh', 'feishu', details | ({'chat': chat} if chat else {}))
     return result
 
 

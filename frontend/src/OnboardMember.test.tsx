@@ -2,22 +2,23 @@
 import { afterEach, beforeEach, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { DiscoveryPanel, Management } from './Management';
-import { contact } from './api';
-import type { User } from './api';
-const { request } = vi.hoisted(() => ({ request: vi.fn() }));
+import { contact, channelLabel } from './api';
+import type { Group, User } from './api';
+const { request, notify } = vi.hoisted(() => ({ request: vi.fn(), notify: vi.fn() }));
 vi.mock('./api', async original => ({ ...await original<typeof import('./api')>(), api: request, post: (path: string, body: unknown) => request(path, body) }));
+vi.mock('sonner', () => ({ toast: { success: notify, error: vi.fn() } }));
 beforeEach(() => { HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); }; });
 afterEach(() => { cleanup(); request.mockReset(); });
 
 const directory = { organizations: [{ id: 'org', name: '运营公司' }], departments: [{ id: 'dept', org_id: 'org', name: '广告部' }], can_create_org: true, can_create_department: true };
 const found = (overrides: Record<string, unknown> = {}) => ({ id: 'a', provider: 'feishu', sender_id: 'ou_a', chat_id: 'oc_a', chat_type: 'p2p', nickname: '小王', nickname_status: 'available', chat_name: null, chat_name_status: 'private_chat', first_seen: '2026-10-04T00:00:00Z', last_seen: '2026-10-04T00:00:00Z', reason: 'unknown_sender', current_reason: 'unknown_sender', status: 'pending', user_id: null, ...overrides });
-const serve = (rows: unknown[]) => request.mockImplementation(async (path: string) => path === '/directory' ? directory : path === '/im/discoveries' ? rows : { ok: true });
+const serve = (rows: unknown[]) => request.mockImplementation(async (path: string) => path === '/directory' ? directory : path.startsWith('/im/discoveries?') ? rows : { ok: true });
 const approvals = () => request.mock.calls.filter(([path]) => String(path).endsWith('/approve'));
 
 it('onboards a discovered sender in one step without asking for any account details', async () => {
   serve([found()]);
   const reload = vi.fn();
-  render(<DiscoveryPanel users={[]} groups={[]} reloadMappings={reload}/>);
+  render(<DiscoveryPanel kind="private" users={[]} groups={[]} reloadMappings={reload}/>);
   fireEvent.click(await screen.findByText('处理接入'));
   expect((await screen.findByLabelText('接入方式') as HTMLSelectElement).value).toBe('new');
   expect((screen.getByLabelText('姓名') as HTMLInputElement).value).toBe('小王');
@@ -35,7 +36,7 @@ it('onboards a discovered sender in one step without asking for any account deta
 
 it('offers only member roles and asks for a department before submitting', async () => {
   serve([found({ nickname: null, nickname_status: 'not_resolved' })]);
-  render(<DiscoveryPanel users={[]} groups={[]} reloadMappings={() => {}}/>);
+  render(<DiscoveryPanel kind="private" users={[]} groups={[]} reloadMappings={() => {}}/>);
   fireEvent.click(await screen.findByText('处理接入'));
   await screen.findByRole('option', { name: '运营公司' });
   expect(screen.getByText('平台未提供昵称，请手动填写；也可先点「刷新发现」补全。')).toBeTruthy();
@@ -53,11 +54,11 @@ it('offers only member roles and asks for a department before submitting', async
 it('shows a failure and keeps the dialog open so nothing is silently lost', async () => {
   request.mockImplementation(async (path: string, body?: unknown) => {
     if (path === '/directory') return directory;
-    if (path === '/im/discoveries') return [found()];
+    if (path.startsWith('/im/discoveries?')) return [found()];
     if (path.endsWith('/approve') && body) throw new Error('该发送者已绑定内部用户，请改用「绑定已有用户」。');
     return { ok: true };
   });
-  render(<DiscoveryPanel users={[]} groups={[]} reloadMappings={() => {}}/>);
+  render(<DiscoveryPanel kind="private" users={[]} groups={[]} reloadMappings={() => {}}/>);
   fireEvent.click(await screen.findByText('处理接入'));
   await screen.findByRole('option', { name: '运营公司' });
   fireEvent.change(screen.getByLabelText('组织'), { target: { value: 'org' } });
@@ -67,9 +68,18 @@ it('shows a failure and keeps the dialog open so nothing is silently lost', asyn
   expect((screen.getByLabelText('姓名') as HTMLInputElement).value).toBe('小王');
 });
 
+it('a connected sender shows its live state instead of the stale discovery reason', async () => {
+  serve([found({ user_id: 'u1', status: 'authorized', current_reason: null, reason: 'unknown_sender' })]);
+  render(<DiscoveryPanel kind="private" users={[]} groups={[]} reloadMappings={() => {}}/>);
+  expect(await screen.findByText('已接入')).toBeTruthy();
+  expect(screen.getByText('无需处理')).toBeTruthy();
+  expect(screen.queryByText('发送者尚未绑定')).toBeNull();
+  expect(screen.queryByText('处理接入')).toBeNull();
+});
+
 it('a sender that is already bound can only continue with the existing-user form', async () => {
-  serve([found({ user_id: 'u1', status: 'authorized', current_reason: null })]);
-  render(<DiscoveryPanel users={[{ id: 'u1', name: '已有员工', email: 'staff@example.invalid', role: 'member', org_id: 'org', team_id: 'dept', active: true }]} groups={[]} reloadMappings={() => {}}/>);
+  serve([found({ user_id: 'u1', status: 'pending', current_reason: 'inactive_user' })]);
+  render(<DiscoveryPanel kind="private" users={[{ id: 'u1', name: '已有员工', email: 'staff@example.invalid', role: 'member', org_id: 'org', team_id: 'dept', active: true }]} groups={[]} reloadMappings={() => {}}/>);
   fireEvent.click(await screen.findByText('处理接入'));
   expect((await screen.findByLabelText('接入方式') as HTMLSelectElement).value).toBe('existing');
   expect((screen.getByRole('option', { name: '新建 IM 成员（无需网页账号）' }) as HTMLOptionElement).disabled).toBe(true);
@@ -80,7 +90,7 @@ it('a sender that is already bound can only continue with the existing-user form
 it('lets the administrator switch to an existing user and keeps the old request shape', async () => {
   const staff: User = { id: 'u1', name: '已有员工', email: 'staff@example.invalid', role: 'member', org_id: 'org', team_id: 'dept', active: true };
   serve([found()]);
-  render(<DiscoveryPanel users={[staff, { ...staff, id: 'u2', name: '仅 IM 成员', email: 'im-secret@im.invalid', login_enabled: false }]} groups={[]} reloadMappings={() => {}}/>);
+  render(<DiscoveryPanel kind="private" users={[staff, { ...staff, id: 'u2', name: '仅 IM 成员', email: 'im-secret@im.invalid', login_enabled: false }]} groups={[]} reloadMappings={() => {}}/>);
   fireEvent.click(await screen.findByText('处理接入'));
   fireEvent.change(await screen.findByLabelText('接入方式'), { target: { value: 'existing' } });
   expect(screen.getByRole('option', { name: '已有员工 · staff@example.invalid · org' })).toBeTruthy();
@@ -91,12 +101,61 @@ it('lets the administrator switch to an existing user and keeps the old request 
   await waitFor(() => expect(request).toHaveBeenCalledWith('/im/discoveries/a/approve', { user_id: 'u1', group_id: null, new_group: null, confirm_member: false }));
 });
 
-it('group senders are told where to register the group after onboarding', async () => {
-  serve([found({ chat_type: 'group', chat_id: 'oc_group', chat_name: '研发群', chat_name_status: 'available' })]);
-  render(<DiscoveryPanel users={[]} groups={[]} reloadMappings={() => {}}/>);
+const groupRow = () => found({ chat_type: 'group', chat_id: 'oc_group', chat_name: '研发群', chat_name_status: 'available' });
+const registered: Group = { id: 'g1', name: '研发协作群', org_id: 'org', team_id: 'dept', member_ids: ['u1'], provider: 'feishu', external_id: null };
+const staffUser: User = { id: 'u1', name: '已有员工', email: 'staff@example.invalid', role: 'member', org_id: 'org', team_id: 'dept', active: true };
+
+it('group senders are told how to continue after onboarding, on the same page', async () => {
+  serve([groupRow()]);
+  render(<DiscoveryPanel kind="group" users={[]} groups={[]} reloadMappings={() => {}}/>);
   fireEvent.click(await screen.findByText('处理接入'));
-  expect(await screen.findByText('该消息来自群聊：接入后，请到「协作群组 → 已发现群 / 待绑定」登记这个群。')).toBeTruthy();
+  expect(await screen.findByText('该消息来自群聊：接入后，群尚未登记的，请在上方「已发现群 / 待绑定」登记；群已登记的，请再点一次「处理接入」，选择这位成员并确认加入群。')).toBeTruthy();
+  expect(screen.queryByLabelText('群登记')).toBeNull(); // Registering is a separate step with an existing member.
+  expect(request).toHaveBeenCalledWith('/im/discoveries?chat=group', expect.anything());
+});
+
+it('group senders can be added to a group in the same step as binding an existing user', async () => {
+  serve([groupRow()]);
+  render(<DiscoveryPanel kind="group" users={[staffUser]} groups={[registered]} reloadMappings={() => {}}/>);
+  fireEvent.click(await screen.findByText('处理接入'));
+  fireEvent.change(await screen.findByLabelText('接入方式'), { target: { value: 'existing' } });
+  fireEvent.change(screen.getByLabelText('绑定内部已有用户'), { target: { value: 'u1' } });
+  fireEvent.change(await screen.findByLabelText('群登记'), { target: { value: 'g1' } });
+  expect(screen.getByText(/本次会明确加入所选发送者/)).toBeTruthy();
+  fireEvent.click(screen.getByLabelText(/我确认群映射与上述成员关系/));
+  fireEvent.click(screen.getByText('确认保存'));
+  await waitFor(() => expect(request).toHaveBeenCalledWith('/im/discoveries/a/approve', { user_id: 'u1', group_id: 'g1', new_group: null, confirm_member: true }));
+});
+
+it('the private panel never offers group registration, even if the server sent a group row', async () => {
+  serve([found(), groupRow()]);
+  render(<DiscoveryPanel kind="private" users={[staffUser]} groups={[registered]} reloadMappings={() => {}}/>);
+  expect(await screen.findAllByText('处理接入')).toHaveLength(1);
+  fireEvent.click(screen.getByText('处理接入'));
+  fireEvent.change(await screen.findByLabelText('接入方式'), { target: { value: 'existing' } });
   expect(screen.queryByLabelText('群登记')).toBeNull();
+  expect(screen.queryByText(/该消息来自群聊/)).toBeNull();
+  expect(screen.queryByText('研发群')).toBeNull();
+});
+
+it('private onboarding finishes with a message that does not mention groups', async () => {
+  serve([found()]);
+  render(<DiscoveryPanel kind="private" users={[staffUser]} groups={[]} reloadMappings={() => {}}/>);
+  fireEvent.click(await screen.findByText('处理接入'));
+  fireEvent.change(await screen.findByLabelText('接入方式'), { target: { value: 'existing' } });
+  fireEvent.change(screen.getByLabelText('绑定内部已有用户'), { target: { value: 'u1' } });
+  fireEvent.click(screen.getByText('确认保存'));
+  await waitFor(() => expect(notify).toHaveBeenCalledWith('已保存。请让对方重新发送消息。'));
+});
+
+it('group onboarding finishes with the reminder that unregistered groups still do not run', async () => {
+  serve([groupRow()]);
+  render(<DiscoveryPanel kind="group" users={[staffUser]} groups={[]} reloadMappings={() => {}}/>);
+  fireEvent.click(await screen.findByText('处理接入'));
+  fireEvent.change(await screen.findByLabelText('接入方式'), { target: { value: 'existing' } });
+  fireEvent.change(screen.getByLabelText('绑定内部已有用户'), { target: { value: 'u1' } });
+  fireEvent.click(screen.getByText('确认保存'));
+  await waitFor(() => expect(notify).toHaveBeenCalledWith('已保存。请重新发送消息；未完成群登记和成员确认时，群消息仍不会执行。'));
 });
 
 it('never shows the placeholder address of an IM-only member in the user list', async () => {
@@ -115,4 +174,10 @@ it('treats users without the flag as normal accounts', () => {
   expect(contact(base)).toBe('x@example.invalid');
   expect(contact({ ...base, login_enabled: true })).toBe('x@example.invalid');
   expect(contact({ ...base, login_enabled: false })).toBe('仅 IM 接入');
+});
+
+it('labels the IM channels a user is bound to', () => {
+  const base = { id: 'x', name: 'x', email: 'x@example.invalid', role: 'member', org_id: null, team_id: null, active: true } as const;
+  expect(channelLabel(base)).toBe('');
+  expect(channelLabel({ ...base, im_channels: ['dingtalk', 'feishu'] })).toBe('钉钉、飞书');
 });

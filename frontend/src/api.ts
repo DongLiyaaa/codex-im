@@ -1,9 +1,9 @@
 export type ID = string | number;
 export type Role = 'super_admin' | 'org_admin' | 'team_lead' | 'member';
-export interface User { id: ID; email: string; name: string; role: Role; org_id: ID | null; team_id: ID | null; active: boolean; login_enabled?: boolean; can_manage?: boolean }
+export interface User { id: ID; email: string; name: string; role: Role; org_id: ID | null; team_id: ID | null; active: boolean; login_enabled?: boolean; can_manage?: boolean; im_channels?: string[] }
 export interface Group { can_edit?: boolean; can_delete?: boolean; org_name?: string | null; team_name?: string | null; id: ID; name: string; org_id: ID | null; team_id: ID | null; member_ids: ID[]; provider: string; external_id?: string | null }
-export interface Resource { id: ID; name: string; kind: 'skill' | 'mcp'; description: string; org_id: ID | null; enabled: boolean; config: Record<string, unknown> }
-export interface Binding { id: ID; subject_type: 'user' | 'group'; subject_id: ID; resource_id: ID }
+export interface Resource { id: ID; name: string; kind: 'skill' | 'mcp'; description: string; org_id: ID | null; team_id?: ID | null; enabled: boolean; config: Record<string, unknown>; can_manage?: boolean; grants?: { subject_type: Binding['subject_type']; subject_id: ID }[] }
+export interface Binding { id: ID; subject_type: 'user' | 'group' | 'team' | 'org'; subject_id: ID; resource_id: ID }
 export interface Conversation { can_delete?: boolean; id: ID; title: string; owner_id: ID; group_id?: ID | null; created_at: string }
 export interface Attachment { id: string; filename: string; size: number; mime: string; status: 'received' | 'fetching' | 'parsing' | 'ready' | 'failed' | 'revoked'; error?: string | null }
 export interface Message { platform_authorization?: { provider: 'feishu' | 'dingtalk'; state: string; can_open: boolean } | null; attachments?: Attachment[]; id: ID; conversation_id: ID; role: string; content: string; created_at: string }
@@ -13,6 +13,8 @@ export interface Identity { id: ID; provider: string; external_user_id: string; 
 export const roles: Record<Role, string> = { super_admin: '超级管理员', org_admin: '组织管理员', team_lead: '团队负责人', member: '成员' };
 export const sameId = (a: ID | null | undefined, b: ID | null | undefined) => a != null && b != null && String(a) === String(b);
 // IM-only members have a placeholder address that must never be shown as if it were a real one.
+export const channelNames: Record<string, string> = { feishu: '飞书', dingtalk: '钉钉' };
+export const channelLabel = (user: User) => (user.im_channels ?? []).map(c => channelNames[c] ?? c).join('、');
 export const contact = (user: User) => user.login_enabled === false ? '仅 IM 接入' : user.email;
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
