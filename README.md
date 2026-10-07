@@ -1,6 +1,63 @@
 # codex-im — Agent Hub
 
-基于 Codex CLI、PostgreSQL、FastAPI 与 React 的 AI 协作工作台，支持角色权限、资源授权、聊天执行队列、审计与飞书/钉钉集成。
+**让团队在网页、飞书、钉钉里，用同一个 AI 助手（Codex）干活，并且谁能用什么、做过什么，都由管理员说了算。**
+
+当前版本：**v-0.0.2**（[更新日志](CHANGELOG.md)）
+
+## 它能做什么
+
+- **在飞书、钉钉里直接对话。** 员工私聊机器人或在群里 @ 它，机器人接到任务后会在那条消息上打一个"处理中"的表情，做完再把表情去掉并回复。
+- **替你操作文档和表格。** 对话里说一句"创建一份钉钉文档"，助手会以你本人的身份创建、读取、修改飞书/钉钉的文档与表格。
+- **管得住。** 按组织、部门、群来分配 Skill 和 MCP；管理员决定哪些人可以发起本人授权；高风险操作需要本人确认；所有对话与操作都有审计记录。
+- **自己的数据留在自己手里。** 数据库、密钥都在你自己的服务器上，模型用你配置的 OpenAI 兼容接口。
+
+## 最快上手（用预构建镜像，不用编译）
+
+需要一台装了 Docker 的 x86_64（amd64）机器。Codex 执行服务的沙箱对容器权限有要求，见下方「使用预构建镜像的说明」最后一条。
+
+```bash
+git clone https://github.com/DongLiyaaa/codex-im.git && cd codex-im
+python3 scripts/init_env.py            # 生成随机密钥到 .env，已有文件不会被覆盖
+# 打开 .env，填上 OPENAI_API_KEY（以及 CODEX_BASE_URL / CODEX_MODEL，如果你用的是第三方接口）
+docker compose --env-file .env -f deploy/compose.ghcr.yaml up -d
+```
+
+然后在本机浏览器打开 http://127.0.0.1:18200，**第一个注册的账号就是超级管理员**，请在对外开放之前自己先完成注册。
+
+镜像是私有的，拉取前需要登录一次（令牌只需要 `read:packages` 权限）：
+`gh auth token | docker login ghcr.io -u 你的GitHub用户名 --password-stdin`。
+
+想从源码构建、不用 Docker 运行，或要接入飞书/钉钉，看下面各章，按需阅读即可。
+
+## 接下来看哪里
+
+| 我想…… | 看这里 |
+|---|---|
+| 接入飞书或钉钉机器人 | [docs/IM_SETUP.md](docs/IM_SETUP.md) |
+| 先搞清楚 Docker 会动到我机器上的什么 | [docs/DOCKER_IMPACT.md](docs/DOCKER_IMPACT.md) |
+| 让员工用本人身份创建/修改文档 | 本页「本人平台按需授权」 |
+| 了解每个版本改了什么 | [CHANGELOG.md](CHANGELOG.md) |
+| 从源码构建或开发 | 本页「安装与首次初始化」「测试」 |
+
+## 使用预构建镜像的说明
+
+| 组件 | 镜像 | 说明 |
+|---|---|---|
+| API、网页、飞书/钉钉接入进程 | `ghcr.io/dongliyaaa/codex-im-api:v-0.0.2` | linux/amd64 |
+| Codex 执行服务 | `ghcr.io/dongliyaaa/codex-im-runner:v-0.0.2` | linux/amd64 |
+| 数据库 | `postgres:16.14-bookworm` | 官方镜像，随 compose 一起拉取 |
+
+- 部署文件 `deploy/compose.ghcr.yaml` 与源码构建用的 `compose.yaml` 内容一致，只是把"本地构建"换成"拉取镜像"。项目名是 `codex-im-packages`，**不会复用**源码构建版的数据库，也不是旧实例的原地升级。
+- 生产环境建议在 `.env` 里用 `CODEX_IM_API_IMAGE` / `CODEX_IM_RUNNER_IMAGE` 固定到经过核验的 `ghcr.io/...@sha256:...`，而不是跟着 `latest` 走。
+- 镜像里不含任何账号、密钥、数据库内容或授权凭据，这些都由你自己的 `.env` 和数据库提供。
+- 需要常驻飞书/钉钉连接时，等 API 起来后加 `--profile im` 再启动对应进程。
+- **Codex 沙箱**：Runner 启动后要能创建命名空间，Docker 默认的安全策略会拦住它，此时首页「Codex CLI 接入检查」会显示 `SANDBOX_UNAVAILABLE`。排查和放行方法见下文「安装与首次初始化」。Apple Silicon（M 系列 Mac）上 amd64 的 Runner 无法启动沙箱，需要用源码和 `compose.runner-arm64.yaml` 自己构建 arm64 Runner，预构建镜像解决不了这一点。
+
+---
+
+## 技术细节
+
+以下各章面向部署和开发人员，信息较密，需要时再查。
 
 ## 对话中创建飞书/钉钉文档与表格（官方 CLI）
 

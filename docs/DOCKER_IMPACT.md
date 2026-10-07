@@ -62,6 +62,28 @@ docker compose --env-file .env.docker -f compose.yaml -f compose.runner-arm64.ya
 
 用 `-p` 指定另一个项目名可以先在隔离环境里试：它只会新建自己的网络和一个运行器容器，不碰本栈。
 
+## 使用 GitHub 预构建镜像（`deploy/compose.ghcr.yaml`）
+
+只想用、不想本地编译时用这份。服务、网络隔离、资源上限、安全选项与 `compose.yaml` 完全一致，只把"本地构建"换成"拉取镜像"。
+
+|项目|内容|对已有环境的影响|
+|---|---|---|
+|项目名|`codex-im-packages`|与源码构建版 `codex-hub-v1` 是两个互不相干的实例|
+|镜像|`ghcr.io/dongliyaaa/codex-im-api:v-0.0.2`、`ghcr.io/dongliyaaa/codex-im-runner:v-0.0.2`、`postgres:16.14-bookworm`|只新增标签；镜像为私有，拉取前需 `docker login ghcr.io`（令牌只需 `read:packages`）|
+|网络|`codex-im-packages_hub_data`（internal）、`codex-im-packages_hub_runner`（internal）、`codex-im-packages_hub_egress`|新网络，不加入任何已有网络|
+|卷|`codex-im-packages_hub_pgdata`、`codex-im-packages_hub_attachments`|新卷，不读取已有卷；不会接管源码构建版的数据|
+|端口|默认 `127.0.0.1:18200`，可用 `HUB_BIND`、`HUB_PORT` 修改|与源码构建版同时运行时，先把其中一个改成不同端口|
+
+固定版本：在 `.env` 里设置 `CODEX_IM_API_IMAGE`、`CODEX_IM_RUNNER_IMAGE` 为 `ghcr.io/...@sha256:...`，避免 `latest` 在不知情时变化。
+
+```bash
+python3 scripts/init_env.py
+docker compose --env-file .env -f deploy/compose.ghcr.yaml config      # 先看最终配置
+docker compose --env-file .env -f deploy/compose.ghcr.yaml pull
+docker compose --env-file .env -f deploy/compose.ghcr.yaml up -d --no-build
+# 停止并保留数据：down；连数据一起删除：down -v（不可恢复）
+```
+
 ## 启动与停止
 
 人工审核此表后：
