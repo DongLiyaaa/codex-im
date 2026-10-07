@@ -19,6 +19,20 @@
 |外部服务|runner 访问模型服务和已授权 HTTPS MCP；api、attachments 访问 IM 平台|需要独立凭据；默认无凭据，不会自动发送 IM 消息|
 |安全|非 root（uid 10001）、只读根文件系统、`cap_drop: ALL`、`no-new-privileges`、tmpfs 限额|Codex Linux 沙箱兼容性需要实际验证；不得为解决兼容性静默启用 privileged|
 
+## 测试库（compose.test.yaml，仅跑测试时临时存在）
+
+由 `scripts/test_backend.sh` 创建，测试结束（含失败、中断）即 `down -v` 删除；发现上次残留时报错退出，不复用、不覆盖。
+
+|项目|配置|对现有容器的影响与边界|
+|---|---|---|
+|项目名/容器|`codex-hub-v1-test` / `codex-hub-v1-test-db-1`|独立 Compose 项目，与 `codex-hub-v1` 及其他容器无重名，不会被 `codex-hub-v1` 的 compose 命令管理|
+|端口|`127.0.0.1::5432`，宿主端口由 Docker 从空闲临时端口中分配|不占用任何固定端口，不会与 1panel 55432、原生 55439、Hub 18210 等冲突；只绑定回环|
+|网络|`codex-hub-v1-test_default`（新建）|不加入已有网络，结束删除|
+|卷|无；数据在 tmpfs（512 MB）|不创建命名卷或匿名卷，不读写已有卷|
+|镜像|`postgres:16.14-bookworm`（linux/amd64），`pull_policy: never`|与 Hub 的 db 共用本机已有镜像，只读使用、不拉取不改标签|
+|资源|1 CPU / 512 MB|跑测试期间占用宿主资源|
+|凭据|每次随机生成的测试库密码，只存在于脚本进程环境|与业务库凭据无关|
+
 ## 已知的边界（如实记录）
 
 - **宿主机本地服务对出网容器可见。** api、attachments、runner 在带出网的 `hub_egress` 网络里，Docker Desktop 允许它们通过 `host.docker.internal` 连到宿主机本地端口。本次实测：运行器能与宿主机上已有的 1panel PostgreSQL（55432）、本机直接运行的 PostgreSQL（55439）和 API（18200）完成握手。这是 Docker Desktop 的通用行为（已有容器同样如此），不会改变那些服务，数据库仍需要账号密码；但它意味着出网容器不是对本机服务的隔离边界。需要更严格时，应在宿主机或 Docker 虚拟机层做出站防火墙，Compose 本身无法做到。

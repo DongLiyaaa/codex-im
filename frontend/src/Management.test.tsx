@@ -53,7 +53,7 @@ it('links an existing group without rewriting membership or scope',async()=>{
 });
 it('keeps modal header separate from scrolling body and restores background and focus',()=>{
  const before=document.createElement('button'); document.body.append(before); before.focus(); document.body.style.overflow='auto';
- const view=render(<Modal title="新增能力资源" close={vi.fn()}><form><input aria-label="字段"/><button>保存</button></form></Modal>);
+ const view=render(<Modal title="新增 Skill 或 MCP" close={vi.fn()}><form><input aria-label="字段"/><button>保存</button></form></Modal>);
  const dialog=screen.getByRole('dialog'); expect(dialog.querySelector('.modal-head')).toBeTruthy(); expect(dialog.querySelector('.modal-body form')).toBeTruthy(); expect(dialog.querySelector('.modal-body .modal-head')).toBeNull(); expect(document.body.style.overflow).toBe('hidden'); view.unmount(); expect(document.body.style.overflow).toBe('auto'); expect(document.activeElement).toBe(before); before.remove();
 });
 

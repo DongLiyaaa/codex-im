@@ -1,7 +1,8 @@
-"""Best-effort native Feishu reaction outbox. Never log remote bodies or IDs.
+"""Best-effort native work-reaction outbox (Feishu, DingTalk Stream). Never log remote bodies or IDs.
 
-Typing is the documented keyboard/work emoji, not an invented WORKING enum.
+Feishu: Typing is the documented keyboard/work emoji, not an invented WORKING enum.
 Ambiguous creates are reconciled by listing only this app's Typing reaction.
+DingTalk: the bot's text emotion on the user's message; recall needs no reaction id and is safe to repeat.
 """
 from datetime import timedelta
 from urllib.parse import quote
@@ -14,11 +15,15 @@ from . import im, im_settings, im_discovery
 
 EMOJI = 'Typing'
 BASE = 'https://open.feishu.cn/open-apis/im/v1/messages/'
+DINGTALK_BASE = 'https://api.dingtalk.com/v1.0/robot/emotion/'
+DINGTALK_EMOTION = '🤔思考中'
 
 
 class ReactionError(Exception):
-    def __init__(self, code):
+    def __init__(self, code, final=False):
         self.code = code
+        # A definitive platform refusal: retrying cannot change it, so the row must not linger and block group removal.
+        self.final = final
 
 
 def request(client, method, url, token, **kwargs):
@@ -30,6 +35,28 @@ def request(client, method, url, token, **kwargs):
     return data.get('data', {})
 
 
+def dingtalk_emotion(client, action, token, body):
+    response = client.post(DINGTALK_BASE + action, headers={'x-acs-dingtalk-access-token': token}, json=body)
+    if response.is_success:
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and data.get('success') is False:
+            raise ReactionError('REACTION_API_FAILED', True)
+        return
+    if response.status_code == 401:
+        im.forget_token('dingtalk')
+    final = 400 <= response.status_code < 500 and response.status_code not in (401, 429)
+    raise ReactionError('PERMISSION_REQUIRED' if response.status_code == 403 else 'REACTION_API_FAILED', final)
+
+
+def dingtalk_body(chat_id, message_id):
+    return {'robotCode': im._required('DINGTALK_ROBOT_CODE'), 'openMsgId': message_id, 'openConversationId': chat_id,
+            'emotionType': 2, 'emotionName': DINGTALK_EMOTION,
+            'textEmotion': {'emotionId': '2659900', 'emotionName': DINGTALK_EMOTION, 'text': DINGTALK_EMOTION, 'backgroundId': 'im_bg_1'}}
+
+
 def process(run_id, create=False, factory=None):
     """Serialize across processes; commit intent before any HTTP side effect.
 
@@ -39,13 +66,18 @@ def process(run_id, create=False, factory=None):
     factory = factory or SessionLocal
     try:
         with factory.kw['bind'].connect() as conn:
+            provider = conn.scalar(select(IMEvent.provider).where(IMEvent.run_id == run_id))
+            conn.commit()
+            if provider not in ('feishu', 'dingtalk'):
+                return
+            shared = 71901 if provider == 'feishu' else 71902
             key = int.from_bytes(hashlib.sha256(('reaction:' + run_id).encode()).digest()[:8], 'big', signed=True)
             if not conn.scalar(select(func.pg_try_advisory_lock(key))):
                 conn.commit()
                 return
             conn.commit()
             try:
-                if not conn.scalar(select(func.pg_try_advisory_lock_shared(71901))):
+                if not conn.scalar(select(func.pg_try_advisory_lock_shared(shared))):
                     conn.commit()
                     return
                 conn.commit()
@@ -53,7 +85,7 @@ def process(run_id, create=False, factory=None):
                     _process(conn, factory, run_id, create)
                 finally:
                     conn.rollback()
-                    conn.execute(select(func.pg_advisory_unlock_shared(71901)))
+                    conn.execute(select(func.pg_advisory_unlock_shared(shared)))
                     conn.commit()
             finally:
                 conn.rollback()
@@ -70,10 +102,11 @@ def _process(conn, factory, run_id, create):
         row = db.get(IMReaction, event.id) if event else None
         if not row or row.state == 'cleared':
             return
-        values, _ = im_settings.effective(db, 'feishu')
+        provider = event.provider
+        values, _ = im_settings.effective(db, provider)
         context = im_settings._active.set(values)
         try:
-            if row.app_scope != im_discovery.scope('feishu') or row.app_scope != event.reply_target.get('app_scope'):
+            if row.app_scope != im_discovery.scope(provider) or row.app_scope != event.reply_target.get('app_scope'):
                 row.error = 'APPLICATION_CHANGED'
                 row.updated_at = now()
                 db.commit()
@@ -90,13 +123,18 @@ def _process(conn, factory, run_id, create):
                 db.commit()
                 return
             identifier, message_id, reaction_id = row.event_id, row.message_id, row.reaction_id
+            chat_id = event.reply_target.get('chat_id')
             row.updated_at = now()
             db.commit()
             url = BASE + quote(message_id, safe='') + '/reactions'
             try:
                 with httpx.Client(timeout=3, follow_redirects=False, trust_env=False) as client:
-                    token = im.access_token(client, 'feishu')
-                    if create:
+                    token = im.access_token(client, provider)
+                    if provider == 'dingtalk':
+                        if not isinstance(chat_id, str) or not chat_id:
+                            raise ReactionError('REACTION_API_FAILED', True)
+                        dingtalk_emotion(client, 'reply' if create else 'recall', token, dingtalk_body(chat_id, message_id))
+                    elif create:
                         data = request(client, 'POST', url, token, json={'reaction_type': {'emoji_type': EMOJI}})
                         reaction_id = data.get('reaction_id')
                         if not isinstance(reaction_id, str) or not reaction_id or len(reaction_id) > 256:
@@ -131,11 +169,14 @@ def _process(conn, factory, run_id, create):
                     row.message_id = None
             except Exception as exc:
                 row = db.get(IMReaction, identifier)
-                row.state = 'uncertain' if create else 'cleanup_pending'
                 row.error = exc.code if isinstance(exc, ReactionError) else 'REACTION_UNAVAILABLE'
-                # Reconcile a possibly already deleted reaction on the next retry.
-                if not create:
-                    row.reaction_id = None
+                if getattr(exc, 'final', False):
+                    row.state, row.message_id, row.reaction_id = 'cleared', None, None
+                else:
+                    row.state = 'uncertain' if create else 'cleanup_pending'
+                    # Reconcile a possibly already deleted reaction on the next retry.
+                    if not create:
+                        row.reaction_id = None
             row.updated_at = now()
             db.commit()
         finally:
@@ -155,10 +196,16 @@ def recover(factory=None):
         pass
 
 
-def status(db):
-    app_scope = im_discovery.scope('feishu')
+def status(db, provider='feishu'):
+    app_scope = im_discovery.scope(provider)
     row = db.scalar(select(IMReaction).where(IMReaction.app_scope == app_scope).order_by(IMReaction.updated_at.desc()).limit(1))
-    return {'supported': True, 'emoji_type': EMOJI, 'state': row.state if row else 'unverified',
-            'error': row.error if row else None,
+    state, error = (row.state if row else 'unverified'), (row.error if row else None)
+    if provider == 'dingtalk':
+        return {'supported': True, 'emoji_type': DINGTALK_EMOTION, 'state': state, 'error': error,
+                'required_permissions': ['qyapi_robot_sendmsg'],
+                'message': '钉钉原生工作表情：机器人接到任务后在该条消息上加「' + DINGTALK_EMOTION + '」，回复发出前撤回。'
+                           '使用机器人应用的消息权限；返回 PERMISSION_REQUIRED 时请到开发者后台权限管理确认并重新发布应用版本。'
+                           '仅钉钉长连接（Stream）模式生效。尚无新消息时未验收。'}
+    return {'supported': True, 'emoji_type': EMOJI, 'state': state, 'error': error,
             'required_permissions': ['im:message.reactions:write_only', 'im:message.reactions:read'],
             'message': '飞书原生工作表情：请在开发者后台开通表情回复写入权限；读取权限用于超时或重启后的清理。创建并发布应用版本，由管理员审批。尚无新消息时未验收。'}

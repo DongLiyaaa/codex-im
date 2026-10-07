@@ -59,7 +59,42 @@ WORKSPACE_TOOLS = {
     'run_approved_platform_action': ('approved', None, '执行用户已经批准的高风险操作。仅在收到「我批准了操作 审批码」这类用户消息后调用，参数只有审批码；执行的是服务器保存的、用户批准时看到的那份请求，不能修改。审批码单次有效，已拒绝、已过期、已使用或不属于当前会话的会被拒绝。',
         {'approval_id': {'type': 'string', 'minLength': 4, 'maxLength': 12, 'description': '用户批准的审批码'}}, ['approval_id']),
 }
+CHANNEL_NAMES = {'feishu': '飞书', 'dingtalk': '钉钉'}
+CHANNEL_CLIS = {'feishu': '飞书 lark-cli', 'dingtalk': '钉钉 dws'}
 READ_LIMIT = 60_000
+
+
+def channel_of(db, run):
+    """The IM platform a run came from (feishu/dingtalk), or None for the web workspace, which may use both."""
+    if run is None:
+        return None
+    event = db.scalar(select(IMEvent).where(IMEvent.run_id == run.id))
+    return event.provider if event and event.provider in CHANNEL_NAMES else None
+
+
+def scoped_text(text, channel):
+    if channel is None:
+        return text
+    other = CHANNEL_NAMES['dingtalk' if channel == 'feishu' else 'feishu']
+    mine = CHANNEL_NAMES[channel]
+    text = (text.replace('飞书 lark-cli / 钉钉 dws', CHANNEL_CLIS[channel]).replace('飞书/钉钉', mine))
+    return text + f'（当前渠道为{mine}，只能使用{mine}能力，不提供{other}的任何能力。）'
+
+
+def scoped_properties(properties, channel):
+    if channel is None:
+        return properties
+    properties = dict(properties)
+    if 'provider' in properties:
+        properties['provider'] = {**properties['provider'], 'enum': [channel]}
+    if 'kind' in properties and channel == 'dingtalk':
+        properties['kind'] = {**properties['kind'], 'enum': ['document', 'spreadsheet'], 'description': '资源类型（钉钉支持文档和表格）'}
+    return properties
+
+
+def channel_tools(channel):
+    return {name: spec for name, spec in WORKSPACE_TOOLS.items() if not (channel == 'dingtalk' and name == 'create_platform_base')}
+
 # Bounded per operation: the generic tools are expected to be called several times per task.
 RATE_LIMITS = {'describe': 60, 'command': 30}
 
@@ -155,6 +190,23 @@ def oauth_save(provider: str, body: OAuthUpdate, actor=Depends(current_user), db
     return result
 
 
+from .platform_access import Update as AccessUpdate
+
+
+@router.get('/api/integrations/oauth/{provider}/access')
+def access_list(provider: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
+    from . import policy, platform_access
+    policy.require(actor.active and actor.role == 'super_admin')
+    return platform_access.view(db, provider)
+
+
+@router.put('/api/integrations/oauth/{provider}/access')
+def access_save(provider: str, body: AccessUpdate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
+    from . import policy, platform_access
+    policy.require(actor.active and actor.role == 'super_admin')
+    return platform_access.save(db, actor, provider, body)
+
+
 @router.post('/internal/platform-mcp')
 async def mcp(request: Request, db=Depends(get_db, scope='function')):
     auth = request.headers.get('authorization', '')
@@ -183,15 +235,18 @@ async def mcp(request: Request, db=Depends(get_db, scope='function')):
     elif method == 'ping':
         result = {}
     elif method == 'tools/list':
-        result = {'tools': [{'name': name, 'description': TOOL_DESCRIPTIONS[name][0],
+        claims = json.loads(base64.urlsafe_b64decode(auth[7:].split('.')[0] + '=' * (-len(auth[7:].split('.')[0]) % 4)))
+        channel = channel_of(db, db.get(Run, claims['run']))
+        providers = [channel] if channel else list(platform_auth.PROVIDERS)
+        result = {'tools': [{'name': name, 'description': scoped_text(TOOL_DESCRIPTIONS[name][0], channel),
             'annotations': {'readOnlyHint': TOOL_DESCRIPTIONS[name][1], 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False},
-            'inputSchema': {'type': 'object', 'properties': {'provider': {'type': 'string', 'enum': list(platform_auth.PROVIDERS)}},
+            'inputSchema': {'type': 'object', 'properties': {'provider': {'type': 'string', 'enum': providers}},
                             'required': ['provider'], 'additionalProperties': False}} for name in allowed_tools]
-            + [{'name': name, 'description': spec[2],
+            + [{'name': name, 'description': scoped_text(spec[2], channel),
                 'annotations': {'readOnlyHint': spec[0] in ('read', 'describe'), 'destructiveHint': spec[0] in ('write', 'command', 'approved'),
                                 'idempotentHint': spec[0] in ('read', 'describe'), 'openWorldHint': spec[0] != 'describe'},
-                'inputSchema': {'type': 'object', 'properties': spec[3], 'required': spec[4], 'additionalProperties': False}}
-               for name, spec in WORKSPACE_TOOLS.items()]}
+                'inputSchema': {'type': 'object', 'properties': scoped_properties(spec[3], channel), 'required': spec[4], 'additionalProperties': False}}
+               for name, spec in channel_tools(channel).items()]}
     elif method == 'tools/call' and isinstance(params, dict) and params.get('name') in WORKSPACE_TOOLS:
         result = await workspace_call(db, actor, auth[7:], params)
     elif method == 'tools/call':
@@ -202,9 +257,14 @@ async def mcp(request: Request, db=Depends(get_db, scope='function')):
             raise HTTPException(400, 'Invalid tool arguments')
         name = params['name']
         from .service import audit
-        audit(db, actor, 'platform.tool_call', args['provider'], {'tool': name})
         claims = json.loads(base64.urlsafe_b64decode(auth[7:].split('.')[0] + '=' * (-len(auth[7:].split('.')[0]) % 4)))
         run = db.get(Run, claims['run'])
+        channel = channel_of(db, run)
+        if channel and args['provider'] != channel:
+            return {'jsonrpc': '2.0', 'id': body.get('id'), 'result': {'content': [{'type': 'text', 'text': json.dumps(
+                {'provider': args['provider'], 'state': 'channel_not_supported', 'next_action': 'answer_user',
+                 'message': f'当前是{CHANNEL_NAMES[channel]}渠道，不提供{CHANNEL_NAMES[args["provider"]]}的能力。'}, ensure_ascii=False)}], 'isError': True}}
+        audit(db, actor, 'platform.tool_call', args['provider'], {'tool': name})
         event = db.scalar(select(IMEvent).where(IMEvent.run_id == run.id))
         im_source = event is not None
         im_group = bool(event and event.reply_target.get('chat_type') == 'group')
@@ -272,6 +332,11 @@ async def workspace_call(db, actor, token, params):
     encoded = token.split('.')[0]
     run = db.get(Run, json.loads(base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)))['run'])
     status = {k: v for k, v in (('provider', provider), ('kind', kind)) if v}
+    channel = channel_of(db, run)
+    if channel and (provider not in (None, channel) or (channel == 'dingtalk' and kind == 'base')):
+        status.update(state='channel_not_supported', next_action='answer_user',
+                      message=f'当前是{CHANNEL_NAMES[channel]}渠道，不提供' + ('钉钉多维表格' if kind == 'base' and channel == 'dingtalk' else CHANNEL_NAMES[provider] + '的能力') + '。')
+        return {'content': [{'type': 'text', 'text': json.dumps(status, ensure_ascii=False)}], 'isError': True}
     prepare = {'create': workspace.prepare, 'read': workspace.prepare_read, 'write': workspace.prepare_write,
                'describe': workspace.prepare_describe, 'command': workspace.prepare_command,
                'approved': workspace.prepare_approved}[operation]

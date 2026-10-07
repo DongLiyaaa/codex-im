@@ -1,0 +1,26 @@
+.skill-text-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}
+.skill-text-head label{font-weight:600;color:#3d556b}
+.skill-text-area{width:100%;min-height:220px;line-height:1.7;resize:vertical}
+.skill-text-meta{display:flex;justify-content:space-between;gap:12px;font-size:11px;color:#90a0af;margin-top:6px}
+.skill-text-note{color:#2a8a68}
+.skill-text-error{color:#b44641}
+.header-mode{border:0;margin:0 0 18px;padding:0}
+.header-mode legend{font-weight:600;color:#3d556b;padding:0;margin-bottom:8px}
+.header-mode label{display:flex;align-items:center;gap:10px;padding:6px 0}
+.header-mode input{width:16px;height:16px;accent-color:var(--teal)}
+.header-rows{border:1px solid var(--border);border-radius:11px;padding:16px;margin-bottom:22px;background:#fbfcfd}
+.header-rows[hidden]{display:none}
+.header-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.5fr) auto auto;gap:10px;align-items:end;margin-bottom:12px}
+.header-row label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:#526b80}
+.header-row input{width:100%}
+.header-row .icon-button{height:38px;width:38px}
+.header-rows-foot{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-top:4px}
+.header-rows-foot small{color:#90a0af;font-size:11px}
+.resource-detail dl{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:8px 0 0}
+.resource-detail dt{color:#7a8999}
+.resource-detail dd{margin:0;overflow-wrap:anywhere;color:#3d556b}
+.resource-detail pre.skill-body{white-space:pre-wrap;overflow-wrap:anywhere;font-family:inherit;font-size:12px;line-height:1.7;max-height:260px;overflow:auto;background:#f6f8fa;border-radius:8px;padding:12px;margin:8px 0 0}
+@media(max-width:700px){.header-row{grid-template-columns:minmax(0,1fr) auto auto}.header-row label:first-child,.header-row label:nth-child(2){grid-column:1 / -1}}
+.resource-grants{font-size:12px;line-height:1.6;color:#2a8a68;margin:8px 0 0;overflow-wrap:anywhere}
+.resource-grants.warning{color:#a5651c}
+.resource-grants .link-button{border:0;background:none;padding:0 0 0 6px;color:var(--teal);font:inherit;cursor:pointer;text-decoration:underline}

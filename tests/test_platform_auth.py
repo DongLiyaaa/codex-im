@@ -230,7 +230,8 @@ def test_protocol_feishu(monkeypatch):
 
 def test_protocol_dingtalk_organization_gate(monkeypatch):
     configure(monkeypatch)
-    responses = iter([{'success':True,'result':{'deviceCode':'D','userCode':'U','verificationUri':'https://login.dingtalk.com/device','expiresIn':900,'interval':5,'flowId':'F'}},
+    responses = iter([{'success':True,'result':'dingofficial'},
+                      {'success':True,'result':{'deviceCode':'D','userCode':'U','verificationUri':'https://login.dingtalk.com/device','expiresIn':900,'interval':5,'flowId':'F'}},
                       {'success':True,'data':{'status':'APPROVED','authCode':'A'}},
                       {'accessToken':'TOKEN','expiresIn':7200}, {'success':True,'result':{'cliAuthEnabled':False}}])
     calls = []
@@ -239,18 +240,53 @@ def test_protocol_dingtalk_organization_gate(monkeypatch):
         return next(responses)
     monkeypatch.setattr(pa, 'request', respond)
     d = pa.begin('dingtalk')
-    assert pa.poll('dingtalk', d) == ('organization_denied', {})
-    assert calls[1][1] == 'https://mcp.dingtalk.com/cli/oauth/device/poll'
-    assert calls[2][2]['json']['grantType'] == 'authorization_code'
+    with pytest.raises(pa.ProviderError) as caught:
+        pa.poll('dingtalk', d)
+    # Being an administrator does not switch CLI data access on; the reason is kept so the user is told what to do.
+    assert (caught.value.state, caught.value.reason) == ('organization_denied', 'CLI_NOT_ENABLED')
+    assert calls[0][1] == 'https://mcp.dingtalk.com/cli/clientId'
+    assert calls[1][2]['data']['client_id'] == 'dingofficial'
+    assert calls[2][1] == 'https://mcp.dingtalk.com/cli/oauth/device/poll'
+    # The code is exchanged through the MCP proxy with the official client, never with the app secret.
+    assert calls[3][1] == 'https://mcp.dingtalk.com/oauth2/getToken'
+    assert calls[3][2]['json'] == {'clientId': 'dingofficial', 'authCode': 'A', 'grantType': 'authorization_code'}
 
+
+
+def test_protocol_dingtalk_keeps_the_approving_account(monkeypatch):
+    """getToken names who approved; the worker compares it with the bound person instead of calling the open API."""
+    configure(monkeypatch)
+    responses = iter([{'success':True,'result':'dingofficial'},
+                      {'success':True,'result':{'deviceCode':'D','userCode':'U','verificationUri':'https://login.dingtalk.com/device','expiresIn':900,'interval':5,'flowId':'F'}},
+                      {'success':True,'data':{'status':'APPROVED','authCode':'A'}},
+                      {'accessToken':'TOKEN','expiresIn':7200,'corpId':'ding-corp','corpName':'组织','userId':'staff-1','userName':'本人'},
+                      {'success':True,'result':{'cliAuthEnabled':True}}])
+    calls = []
+    monkeypatch.setattr(pa, 'request', lambda method, url, **kwargs: calls.append(url) or next(responses))
+    d = pa.begin('dingtalk')
+    state, tokens = pa.poll('dingtalk', d)
+    assert (state, tokens) == ('connected', {'access_token': 'TOKEN', 'expires_in': 7200, 'user_id': 'staff-1', 'corp_id': 'ding-corp'})
+    assert not any('api.dingtalk.com' in url or 'oapi.dingtalk.com' in url for url in calls)
 
 # --- Admin-only IM-triggered platform application configuration ---
 
-def im_run(database, group=True):
+def im_run(database, group=True, provider='feishu'):
     from app.im import _enqueue
     from app.models import uid as gen_uid
+    if provider != 'feishu':
+        from app.models import Group, Identity
+        from app.im_discovery import pin, scope
+        with database.begin() as db:
+            owner = db.scalar(select(User))
+            if not db.scalar(select(Identity).where(Identity.provider == provider)):
+                identity = Identity(provider=provider, external_user_id='sender', user_id=owner.id)
+                group = Group(name=provider + '群', org_id=owner.org_id, team_id=owner.team_id, member_ids=[owner.id], provider=provider, external_id='chat')
+                db.add_all([identity, group])
+                db.flush()
+                pin(db, 'identity', identity.id, scope(provider))
+                pin(db, 'group', group.id, scope(provider))
     with database.begin() as db:
-        _enqueue(db, 'feishu', gen_uid(), 'sender', 'chat' if group else 'private-chat', '管理员配置请求', group)
+        _enqueue(db, provider, gen_uid(), 'sender', 'chat' if group else 'private-chat', '管理员配置请求', group)
         run = db.scalar(select(Run).order_by(Run.created_at.desc()))
         run.status = 'running'
         run_id, user_id = run.id, run.user_id
@@ -403,3 +439,17 @@ def test_admin_tool_rejects_extra_arguments(database, monkeypatch):
         assert resp.status_code == 400
     finally:
         main.app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize('status,reason', [
+    ({'success': True, 'result': {'cliAuthEnabled': True}}, None),
+    ({'success': True, 'result': {'cliAuthEnabled': False}}, 'CLI_NOT_ENABLED'),
+    ({'success': True, 'result': {'cliAuthEnabled': False, 'userScope': 'specified', 'allowedUsers': ['x']}}, 'CLI_USER_NOT_ALLOWED'),
+    ({'success': True, 'result': {'cliAuthEnabled': False, 'userScope': 'forbidden'}}, 'CLI_USER_FORBIDDEN'),
+    ({'success': True, 'result': {'cliAuthEnabled': False, 'userScope': 'specified', 'channelScope': 'specified'}}, 'CHANNEL_REQUIRED'),
+    ({'success': False, 'errorCode': 'ENTERPRISE_NOT_AUTHORIZED', 'errorMsg': 'x'}, 'ENTERPRISE_NOT_AUTHORIZED'),
+    ({'success': False}, 'CLI_STATUS_UNKNOWN'),
+])
+def test_dingtalk_cli_denial_reasons(status, reason):
+    assert pa.cli_denial(status) == reason
+    assert reason is None or reason in pa.DENIALS

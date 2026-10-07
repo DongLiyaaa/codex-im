@@ -4,7 +4,7 @@ from datetime import timedelta
 from sqlalchemy import select
 from .models import (PlatformAuthJob, PlatformAuthRequest, PlatformConnection, Identity,
                      IMEvent, Run, Message, User, Conversation, now, uid)
-from . import platform_auth as pa, platform_settings as settings, im_settings, im_discovery, policy
+from . import platform_auth as pa, platform_settings as settings, im_settings, im_discovery, policy, platform_access as access
 
 
 def fingerprint(provider):
@@ -49,12 +49,17 @@ def status(db, actor, provider, private=False):
             row.state, row.encrypted = problem, ''
             if job:
                 job.phase, job.notification, job.delivery, job.error = 'done', 'cancelled', 'not_requested', problem.upper()
+        elif row.state in access.ACTIVE and not access.allowed(db, actor, provider):
+            access.revoke(db, row)
         result = pa.view(row, private)
         if private and row.state == 'pending' and result.get('authorization_url') and not pa.valid_link(provider, result['authorization_url']):
             result.pop('authorization_url', None)
             result.pop('user_code', None)
         result['delivery_status'] = job.delivery if job else 'not_requested'
         result['error_code'] = job.error if job else problem.upper() if problem else row.state.upper() if row.state in pa.MESSAGES and row.state not in ('disconnected', 'pending', 'starting', 'connected') else None
+        details = {'organization_denied': pa.DENIALS, 'identity_unverified': pa.UNVERIFIED}.get(row.state, {})
+        if result['error_code'] in details:
+            result['message'] = details[result['error_code']]
         return result
 
 
@@ -102,6 +107,9 @@ def start(db, actor, provider, run=None, private=False):
         problem = settings.readiness(db, provider)
         if problem:
             row.state, row.encrypted = problem, ''
+            return status(db, actor, provider, private)
+        if not access.allowed(db, actor, provider):
+            access.revoke(db, row)
             return status(db, actor, provider, private)
         from .security import rate_limit
         rate_limit('platform-start:' + actor.id + ':' + provider)

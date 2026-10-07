@@ -172,7 +172,7 @@ BUSY = '上一个任务还在处理中，这条消息没有执行。请等它完
 ACTIVE_RUNS = ('queued', 'running', 'waiting_attachments')
 
 
-def _enqueue(db, provider, event_id, sender_id, chat_id, content, is_group, reply_mode='webhook', nickname=None, ingress_reason=None, attachment_refs=None, chat_name=None, notice=None, sender_internal=False):
+def _enqueue(db, provider, event_id, sender_id, chat_id, content, is_group, reply_mode='webhook', nickname=None, ingress_reason=None, attachment_refs=None, chat_name=None, notice=None, sender_internal=False, corp_id=None):
     from .service import enqueue_message
     from . import im_discovery
     from .models import IMOutbox, Run
@@ -197,6 +197,11 @@ def _enqueue(db, provider, event_id, sender_id, chat_id, content, is_group, repl
         db.add(IMEvent(provider=provider, event_id=event_id, reply_target={}, delivery_error='NOT_AUTHORIZED'))
         db.flush()
         return {'ok': True, 'pending': True}
+    if provider == 'dingtalk' and sender_internal and isinstance(corp_id, str) and 0 < len(corp_id) <= 200:
+        # The platform says sender and robot share this organization; it qualifies the staff id for authorizations.
+        identity = db.scalar(select(Identity).where(Identity.provider == provider, Identity.external_user_id == sender_id))
+        if identity and identity.user_id == user.id and identity.corp_id != corp_id:
+            identity.corp_id = corp_id
     scope = 'group:' + group.id if group else 'user:' + user.id + ':' + chat_id
     _lock(db, 'im:chat:' + provider + ':' + scope)
     # Provider-specific title prevents accidentally reusing a web private conversation.
@@ -251,7 +256,7 @@ def _enqueue(db, provider, event_id, sender_id, chat_id, content, is_group, repl
         result = enqueue_message(db, user, conversation, content)
     run = result['run']
     event.run_id = run['id'] if isinstance(run, dict) else run.id
-    if provider == 'feishu':
+    if provider == 'feishu' or (provider == 'dingtalk' and reply_mode == 'stream'):
         from .models import IMReaction
         db.add(IMReaction(event_id=event.id, message_id=raw_message_id, app_scope=app_scope))
     db.flush()
@@ -328,7 +333,7 @@ async def _dingtalk_callback(request, db):
         return _enqueue(db, 'dingtalk', payload['msgId'], payload['senderStaffId'],
                         payload['conversationId'], content, is_group,
                         nickname=payload.get('senderNick'), chat_name=payload.get('conversationTitle'), notice=inbound.notice,
-                        sender_internal=im_inbound.dingtalk_internal(payload),
+                        sender_internal=im_inbound.dingtalk_internal(payload), corp_id=payload.get('chatbotCorpId'),
                         ingress_reason=None if is_group and payload['conversationId'] == fixed_chat else 'unsupported_reply_target',
                         **({'attachment_refs': refs} if refs else {}))
     except (KeyError, TypeError, AttributeError):

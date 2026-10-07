@@ -32,6 +32,15 @@ class SetupAdmin(Login):
         return value
 
 
+def check_tenant(role, org_id, team_id):
+    if role != 'super_admin' and not org_id:
+        raise ValueError('org_id required')
+    if role in ('team_lead', 'member') and not team_id:
+        raise ValueError('team_id required')
+    if role == 'super_admin' and (org_id or team_id):
+        raise ValueError('super_admin is global')
+
+
 class UserCreate(Login):
     name: str = Field(min_length=1, max_length=200)
     role: Literal['super_admin', 'org_admin', 'team_lead', 'member']
@@ -42,23 +51,33 @@ class UserCreate(Login):
 
     @model_validator(mode='after')
     def tenant(self):
-        if self.role != 'super_admin' and not self.org_id:
-            raise ValueError('org_id required')
-        if self.role in ('team_lead', 'member') and not self.team_id:
-            raise ValueError('team_id required')
-        if self.role == 'super_admin' and (self.org_id or self.team_id):
-            raise ValueError('super_admin is global')
+        check_tenant(self.role, self.org_id, self.team_id)
         return self
+
+
+PLACEMENT = {'role', 'org_id', 'team_id'}
 
 
 class UserUpdate(Input):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     active: bool | None = None
+    # Role, organization and department are sent together, so the target placement is always stated in full.
+    role: Literal['super_admin', 'org_admin', 'team_lead', 'member'] | None = None
+    org_id: str | None = Field(default=None, min_length=1, max_length=100)
+    team_id: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @property
+    def placement(self):
+        return bool(PLACEMENT & self.model_fields_set)
 
     @model_validator(mode='after')
     def something(self):
-        if self.name is None and self.active is None:
+        if self.name is None and self.active is None and not self.placement:
             raise ValueError('Nothing to update')
+        if self.placement:
+            if not PLACEMENT <= self.model_fields_set or self.role is None:
+                raise ValueError('role, org_id and team_id are updated together')
+            check_tenant(self.role, self.org_id, self.team_id)
         return self
 
 
@@ -96,12 +115,38 @@ class ResourceCreate(Input):
     kind: Literal['skill', 'mcp']
     description: str = Field(default='', max_length=5000)
     org_id: str | None = Field(default=None, min_length=1, max_length=100)
+    team_id: str | None = Field(default=None, min_length=1, max_length=100)
     enabled: bool = True
     config: dict
+    # Also grant the resource to everyone in its scope (the department, or the whole organization).
+    grant_scope: bool = False
+
+    @model_validator(mode='after')
+    def department_needs_organization(self):
+        if self.team_id and not self.org_id:
+            raise ValueError('部门范围的资源必须同时指定组织')
+        return self
+
+
+class ResourceUpdate(Input):
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(default='', max_length=5000)
+    org_id: str | None = Field(default=None, min_length=1, max_length=100)
+    team_id: str | None = Field(default=None, min_length=1, max_length=100)
+    enabled: bool = True
+    config: dict
+    grant_scope: bool = False
+
+    @model_validator(mode='after')
+    def department_needs_organization(self):
+        if self.team_id and not self.org_id:
+            raise ValueError('部门范围的资源必须同时指定组织')
+        return self
 
 
 class BindingCreate(Input):
-    subject_type: Literal['user', 'group']
+    # 'team' and 'org' grant to everyone in a department or organization, users and groups alike.
+    subject_type: Literal['user', 'group', 'team', 'org']
     subject_id: str = Field(min_length=1, max_length=36)
     resource_id: str = Field(min_length=1, max_length=36)
 
@@ -144,6 +189,7 @@ class UserOut(Output):
     active: bool
     login_enabled: bool = True
     can_manage: bool = False
+    im_channels: list[str] = []
 
 
 class GroupOut(Output):
