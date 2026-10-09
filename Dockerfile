@@ -33,6 +33,6 @@ ARG VERSION=0.0.3
 LABEL org.opencontainers.image.source="https://github.com/DongLiyaaa/codex-im" \
       org.opencontainers.image.description="Agent Hub API、网页与飞书/钉钉接入进程" \
       org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.licenses="NOASSERTION"
+      org.opencontainers.image.licenses="MIT"
 EXPOSE 18200
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "18200", "--workers", "1"]
