@@ -19,13 +19,14 @@ from .models import Conversation, IMEvent, IMOutbox, PlatformApproval, PlatformC
 log = logging.getLogger(__name__)
 ACTIVE = ('queued', 'running', 'waiting_attachments')
 ALIASES = {'/help': 'help', '/帮助': 'help', '/new': 'new', '/新会话': 'new', '/reset': 'new',
-           '/stop': 'stop', '/停止': 'stop', '/status': 'status', '/状态': 'status'}
+           '/stop': 'stop', '/停止': 'stop', '/status': 'status', '/状态': 'status', '/agent': 'agent'}
 ROLES = {'super_admin': '超级管理员', 'org_admin': '组织管理员', 'team_lead': '团队负责人', 'member': '成员'}
 STATES = {'connected': '已连接', 'pending': '待你确认', 'starting': '发起中'}
 RUN_STATES = {'queued': '排队中', 'running': '执行中', 'waiting_attachments': '等待附件解析'}
 HELP_HEAD = ('可用指令：\n'
              '/help —— 查看本说明\n'
              '/new —— 开启新会话，之前的上下文不再带入（历史保留在 Hub）\n'
+             '/agent —— 查看当前 Agent；/agent codex 或 /agent claude 切换（会开启新会话，上下文不互通）\n'
              '/stop —— 停止你排队中或执行中的任务\n'
              '/status —— 查看身份、当前任务、可用能力、本人授权和待确认操作\n'
              '/approve 审批码 —— 批准高风险操作（删除、覆盖整篇文档等）；/deny 审批码 拒绝\n\n'
@@ -43,11 +44,16 @@ def help_text(provider):
     return HELP_HEAD + HELP_TAILS[provider] if provider in HELP_TAILS else HELP_HEAD + HELP_TAILS['feishu'] + '\n' + HELP_TAILS['dingtalk']
 
 
-def parse(content):
+def split(content):
     text = re.sub(r'^(?:@\S+\s+)+', '', (content or '').strip()).strip()
     if not text.startswith('/') or len(text) > 64:
-        return None
-    return ALIASES.get(text.split()[0].lower())
+        return None, ''
+    head, _, rest = text.partition(' ')
+    return ALIASES.get(head.lower()), rest.strip().lower()
+
+
+def parse(content):
+    return split(content)[0]
 
 
 def _status(db, user, group, conversation, provider=None):
@@ -93,7 +99,7 @@ def _stop(db, user, group, conversation, provider):
     return '没有你可以停止的任务（群里他人的任务需群管理员停止）。' if runs else '当前没有排队或执行中的任务。'
 
 
-def _new(db, user, conversation):
+def _new(db, user, conversation, agent=None):
     from .service import archive_conversation
     try:
         archive_conversation(db, user, conversation.id)
@@ -101,13 +107,36 @@ def _new(db, user, conversation):
         if exc.status_code == 409:
             return '当前会话还有排队或执行中的任务（或回复状态未清理完），请先发送 /stop 或稍后再试。', conversation
         return '群会话重置需要群管理员（或更高权限）操作。', conversation
-    fresh = Conversation(title=conversation.title, owner_id=user.id, group_id=conversation.group_id)
+    fresh = Conversation(title=conversation.title, owner_id=user.id, group_id=conversation.group_id,
+                         agent=agent or conversation.agent)
     db.add(fresh)
     db.flush()
     return '已开启新会话，之前的上下文不会再带入；历史记录仍保留在 Hub。', fresh
 
 
-def handle(db, command, provider, event, user, group, conversation):
+def _agent(db, user, group, conversation, name):
+    from . import agents
+    from .service import audit
+    current = f'当前 Agent：{agents.LABELS.get(conversation.agent, conversation.agent)}。'
+    choices = '、'.join(f'/agent {item["id"]}（{item["label"]}）' for item in agents.options())
+    if not name:
+        return f'{current}\n可切换：{choices}。切换会开启新会话，两个 Agent 的上下文不互通。', conversation
+    if name not in agents.AGENTS:
+        return f'没有这个 Agent。可切换：{choices}。', conversation
+    if name not in agents.enabled():
+        return f'{agents.LABELS[name]} 尚未在 Hub 启用，请联系管理员。', conversation
+    if name == conversation.agent:
+        return f'已经在使用 {agents.LABELS[name]}。需要清空上下文请发送 /new。', conversation
+    text, fresh = _new(db, user, conversation, name)
+    if fresh is conversation:
+        return text.replace('群会话重置', '群会话切换 Agent'), conversation
+    if not group:
+        user.preferred_agent = name
+    audit(db, user, 'agent.switch', fresh.id, {'from': conversation.agent, 'to': name})
+    return f'已切换到 {agents.LABELS[name]} 并开启新会话，之前的上下文不会带入；历史记录仍保留在 Hub。', fresh
+
+
+def handle(db, command, provider, event, user, group, conversation, argument=''):
     """Runs inside the ingress transaction; queues the reply for the outbox thread."""
     if command == 'help':
         text = help_text(provider)
@@ -116,7 +145,7 @@ def handle(db, command, provider, event, user, group, conversation):
     elif command == 'stop':
         text = _stop(db, user, group, conversation, provider)
     else:
-        text, conversation = _new(db, user, conversation)
+        text, conversation = _agent(db, user, group, conversation, argument) if command == 'agent' else _new(db, user, conversation)
         event.reply_target = {**event.reply_target, 'conversation_id': conversation.id}
     db.add(IMOutbox(event_id=event.id, text=text))
     db.flush()

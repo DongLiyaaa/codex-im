@@ -55,6 +55,7 @@ class User(Base):
     org_id: Mapped[str | None] = mapped_column(String(100), index=True)
     team_id: Mapped[str | None] = mapped_column(String(100), index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    preferred_agent: Mapped[str | None] = mapped_column(String(20))
 
     @property
     def login_enabled(self) -> bool:
@@ -121,6 +122,7 @@ class Conversation(Base):
     group_id: Mapped[str | None] = mapped_column(ForeignKey('groups.id'), index=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     archived_by: Mapped[str | None] = mapped_column(String(36))
+    agent: Mapped[str] = mapped_column(String(20), default='codex', server_default='codex')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -141,6 +143,7 @@ class Run(Base):
     message_id: Mapped[str] = mapped_column(ForeignKey('messages.id'))
     status: Mapped[str] = mapped_column(String(20), default='queued', index=True)
     error: Mapped[str | None] = mapped_column(Text)
+    agent: Mapped[str] = mapped_column(String(20), default='codex', server_default='codex')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

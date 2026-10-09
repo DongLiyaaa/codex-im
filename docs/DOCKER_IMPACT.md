@@ -16,6 +16,7 @@
 |资源|db 768 MiB/1 CPU，api 768 MiB/1 CPU，attachments 512 MiB/1 CPU，runner 1.5 GiB/2 CPU（pids 192）；可选 IM 各 384 MiB/0.5 CPU/64 PID|上限合计约 3.5 GiB（含 IM 约 4.25 GiB）。仍共享 Docker Desktop 宿主资源，不能声称零性能影响；amd64 构建期 CPU 会冲高，另计|
 |IM 常驻进程|可选 `im` profile，默认不启动|飞书同一应用只允许一个长连接；本机已有直接运行的 IM 进程时不要同时启动，否则消息会被两边各分走一部分。启动前先停掉其中一边|
 |IM 数据库|共享本栈专属 PG，使用 im_connections 心跳表|每进程 5 秒一次状态写入；需要 API 先完成业务表迁移，由 api 健康检查保证启动顺序|
+|Claude CLI（可选）|runner 镜像额外安装固定版本的 Claude CLI（2.1.286），多占一部分镜像体积；`HUB_AGENTS` 默认只有 codex|不新增容器、端口、网络或卷。启用 claude 后 runner 另外访问 `CLAUDE_BASE_URL`（留空为 Anthropic 官方端点），与 Codex 的出站规则一致，仍无 Docker socket 与宿主 HOME 挂载|
 |外部服务|runner 访问模型服务和已授权 HTTPS MCP；api、attachments 访问 IM 平台|需要独立凭据；默认无凭据，不会自动发送 IM 消息|
 |安全|非 root（uid 10001）、只读根文件系统、`cap_drop: ALL`、`no-new-privileges`、tmpfs 限额|Codex Linux 沙箱兼容性需要实际验证；不得为解决兼容性静默启用 privileged|
 

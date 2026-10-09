@@ -6,9 +6,10 @@ FROM --platform=${RUNNER_PLATFORM} python:3.12.10-slim-bookworm
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && npm install --global --registry=https://registry.npmjs.org @openai/codex@0.157.1 \
+    && npm install --global --registry=https://registry.npmjs.org @openai/codex@0.157.1 @anthropic-ai/claude-code@2.1.286 \
     && npm cache clean --force \
     && codex --version \
+    && claude --version \
     && useradd --uid 10001 --create-home runner
 WORKDIR /app
 COPY requirements.txt ./requirements.txt

@@ -52,6 +52,8 @@ services:
       APP_ORIGIN: ${APP_ORIGIN:-http://127.0.0.1:18200}
       RUNNER_URL: http://runner:8081
       RUNNER_TOKEN: ${RUNNER_TOKEN:?Set RUNNER_TOKEN}
+      HUB_AGENTS: ${HUB_AGENTS:-codex}
+      DEFAULT_AGENT: ${DEFAULT_AGENT:-codex}
       PLATFORM_BRIDGE_KEY: ${PLATFORM_BRIDGE_KEY:-}
       PLATFORM_AUTH_KEY: ${PLATFORM_AUTH_KEY:-}
       IM_CONFIG_KEY: ${IM_CONFIG_KEY:-}
@@ -191,6 +193,13 @@ services:
       CODEX_BASE_URL: ${CODEX_BASE_URL:-}
       # Optional model egress proxy, e.g. http://host.docker.internal:7890; the two bridges below always stay direct.
       CODEX_PROXY_URL: ${CODEX_PROXY_URL:-}
+      # Agents offered to users. Claude CLI is an additional option beside Codex and stays off until listed here.
+      HUB_AGENTS: ${HUB_AGENTS:-codex}
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-}
+      # Optional Anthropic-compatible gateway (public https only, without a trailing /v1).
+      CLAUDE_BASE_URL: ${CLAUDE_BASE_URL:-}
+      CLAUDE_PROXY_URL: ${CLAUDE_PROXY_URL:-}
       PLATFORM_BRIDGE_URL: http://api:18200/internal/platform-mcp
       ATTACHMENT_BRIDGE_URL: http://api:18200/internal/attachment-mcp
     networks: [hub_runner, hub_egress]

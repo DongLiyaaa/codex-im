@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from .db import engine, SessionLocal, get_db
 from .models import Base, User, Group, Resource, Binding, Conversation, Message, Run, Audit, Identity, SessionToken, now
 from .security import current_user, hash_password, verify_password, token_hash, session_secret, rate_limit
-from . import policy, resource_secrets, schemas, service, im_settings
+from . import agents, policy, resource_secrets, schemas, service, im_settings
 
 
 @asynccontextmanager
@@ -436,11 +436,26 @@ def create_conversation(body: schemas.ConversationCreate, actor=Depends(current_
     if body.group_id:
         group = service.lock_group(db, body.group_id)
         policy.require(policy.is_group_member(actor, group))
-    conversation = Conversation(**body.model_dump(), owner_id=actor.id)
+    fields = body.model_dump(exclude={'agent'})
+    agent = agents.require_enabled(body.agent) if body.agent else agents.resolve(actor)
+    conversation = Conversation(**fields, owner_id=actor.id, agent=agent)
     db.add(conversation)
     db.flush()
-    service.audit(db, actor, 'conversation.create', conversation.id)
+    service.audit(db, actor, 'conversation.create', conversation.id, {'agent': agent})
     return conversation_out(db, actor, conversation)
+
+
+@app.get('/api/agents')
+def list_agents(actor=Depends(current_user)):
+    return {'agents': agents.options(), 'default': agents.default(), 'preferred': agents.resolve(actor)}
+
+
+@app.put('/api/agents/preference')
+def set_agent_preference(body: schemas.AgentPreference, actor=Depends(current_user), db=Depends(get_db, scope='function')):
+    agents.require_enabled(body.agent)
+    db.get(User, actor.id).preferred_agent = body.agent
+    service.audit(db, actor, 'agent.preference', actor.id, {'agent': body.agent})
+    return {'preferred': body.agent}
 
 
 @app.get('/api/conversations/{identifier}/messages', response_model=list[schemas.MessageOut])
@@ -576,7 +591,7 @@ def save_integration_config(provider: str, body: im_settings.Update, actor=Depen
 @app.get('/api/integrations/status')
 def integrations(actor=Depends(platform_admin), db=Depends(get_db, scope='function')):
     from .models import IMConnection
-    result = {'runner': {'configured': bool(os.getenv('RUNNER_TOKEN'))}}
+    result = {'runner': {'configured': bool(os.getenv('RUNNER_TOKEN')), 'agents': agents.enabled()}}
     for provider in ('feishu', 'dingtalk'):
         with im_settings.snapshot(db, provider) as values:
             config = im.configuration(provider)

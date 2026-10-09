@@ -11,6 +11,13 @@ export interface CodexRunnerStatus {
   config_error: string | null;
   sandbox: { state: 'ok' | 'failed' | 'skipped'; error: string | null };
   model_endpoint: { state: string; http_status: number | null; model_listed: boolean | null; reason: string | null };
+  agents?: { codex: { enabled: boolean; ready: boolean }; claude: ClaudeAgentStatus };
+}
+export interface ClaudeAgentStatus {
+  enabled: boolean; ready: boolean; installed?: boolean; version?: string | null; pinned_version?: string | null;
+  model?: { id: string | null; endpoint_host: string | null; credential_configured: boolean } | null;
+  config_error?: string | null;
+  model_endpoint?: { state: string; http_status: number | null; model_listed: boolean | null; reason: string | null } | null;
 }
 export interface CodexStatusResult { reachable: boolean; error: string | null; runner: CodexRunnerStatus | null }
 type Tone = 'ok' | 'fail' | 'idle';
@@ -48,6 +55,10 @@ const skipReasons: Record<string, string> = {
   NO_CUSTOM_ENDPOINT: '使用默认端点，不做探测。',
   CONFIG_ERROR: '配置有误，已跳过。',
   SOCKS_PROXY_NOT_PROBED: '经 SOCKS 代理访问，不做探测。',
+};
+const claudeConfigErrors: Record<string, string> = {
+  INVALID_CLAUDE_MODEL: '模型 ID 的格式不合法。',
+  INVALID_CLAUDE_BASE_URL: '模型网关地址不合法，需要是公网 https 地址，且不带结尾的 /v1。',
 };
 const toneBadge: Record<Tone, { text: string; badge: string }> = { ok: { text: '通过', badge: 'green' }, fail: { text: '未通过', badge: 'red' }, idle: { text: '未检查', badge: '' } };
 const Icon = { ok: CircleCheck, fail: CircleX, idle: CircleMinus };
@@ -94,6 +105,39 @@ export function codexRows(result: CodexStatusResult): Row[] {
   return rows;
 }
 
+export function claudeRows(claude: ClaudeAgentStatus): Row[] {
+  const names = ['Claude CLI', '模型与网关', '模型凭据', '网关连通'];
+  const error = claude.config_error ?? '';
+  const modelBad = error in claudeConfigErrors;
+  const keyMissing = error === 'CLAUDE_API_KEY_NOT_CONFIGURED' || claude.model?.credential_configured === false;
+  const endpoint = claude.model_endpoint;
+  const rows: Row[] = [claude.installed
+    ? { name: names[0], tone: 'ok', detail: claude.version ? (claude.version === claude.pinned_version ? `已安装 ${claude.version}。` : `已安装 ${claude.version}（部署固定版本 ${claude.pinned_version}）。`) : '已安装，但无法读取版本。' }
+    : { name: names[0], tone: 'fail', detail: '执行器里没有找到 Claude CLI。' }];
+  rows.push(modelBad
+    ? { name: names[1], tone: 'fail', detail: claudeConfigErrors[error] }
+    : { name: names[1], tone: 'ok', detail: `${claude.model?.id ? `模型 ${claude.model.id}` : '未指定模型，使用 Claude CLI 默认模型'}；${claude.model?.endpoint_host ? `网关 ${claude.model.endpoint_host}` : '默认 Anthropic 端点'}。` });
+  rows.push(keyMissing
+    ? { name: names[2], tone: 'fail', detail: '没有配置 Claude API Key。' }
+    : { name: names[2], tone: 'ok', detail: '已配置 API Key（不会显示内容）。' });
+  if (!endpoint || endpoint.state === 'skipped') rows.push({ name: names[3], tone: 'idle', detail: skipReasons[endpoint?.reason ?? ''] ?? '未检查。' });
+  else if (endpoint.state === 'ok') rows.push({ name: names[3], tone: 'ok', detail: '网关连通正常。' });
+  else if (endpoint.state === 'unverified') rows.push({ name: names[3], tone: 'idle', detail: '网关没有提供模型列表，无法验证，不影响判断。' });
+  else rows.push({ name: names[3], tone: 'fail', detail: `${endpointFailures[endpoint.state] ?? '网关检查失败。'}${endpoint.http_status ? `（HTTP ${endpoint.http_status}）` : ''}` });
+  return rows;
+}
+
+function Checks({ label, rows }: { label: string; rows: Row[] }) {
+  return <ul className="codex-check" aria-label={label}>
+    {rows.map(row => { const Mark = Icon[row.tone]; const state = toneBadge[row.tone]; return <li className="codex-check-row" key={row.name}>
+      <Mark size={18} className={row.tone} aria-hidden="true"/>
+      <span className="codex-check-name">{row.name}</span>
+      <span className="codex-check-detail">{row.detail}</span>
+      <Badge tone={state.badge}>{state.text}</Badge>
+    </li>; })}
+  </ul>;
+}
+
 export function CodexStatus() {
   const [forced, setForced] = useState(false);
   const { data, error, loading, reload } = useData<CodexStatusResult>(forced ? '/system/codex-status?refresh=true' : '/system/codex-status');
@@ -111,14 +155,11 @@ export function CodexStatus() {
     </div>
     <Feedback error={error || (data && !valid ? '检查结果的格式无法识别。' : '')}/>
     {loading ? <Loading/> : valid && <>
-      <ul className="codex-check" aria-label="Codex CLI 检查项">
-        {codexRows(data).map(row => { const Mark = Icon[row.tone]; const state = toneBadge[row.tone]; return <li className="codex-check-row" key={row.name}>
-          <Mark size={18} className={row.tone} aria-hidden="true"/>
-          <span className="codex-check-name">{row.name}</span>
-          <span className="codex-check-detail">{row.detail}</span>
-          <Badge tone={state.badge}>{state.text}</Badge>
-        </li>; })}
-      </ul>
+      <Checks label="Codex CLI 检查项" rows={codexRows(data)}/>
+      {data.runner?.agents?.claude?.enabled && <>
+        <div className="section-heading"><h2>Claude CLI 接入检查</h2><Badge tone={data.runner.agents.claude.ready ? 'green' : 'red'}>{data.runner.agents.claude.ready ? '可用' : '不可用'}</Badge></div>
+        <Checks label="Claude CLI 检查项" rows={claudeRows(data.runner.agents.claude)}/>
+      </>}
       {data.runner && <div className="codex-check-foot">上次检查：{dateText(new Date(data.runner.checked_at * 1000).toISOString())}。结果缓存约 30 秒。</div>}
     </>}
   </section>;

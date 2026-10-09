@@ -211,7 +211,9 @@ def _enqueue(db, provider, event_id, sender_id, chat_id, content, is_group, repl
     conversation = db.scalar(query.order_by(Conversation.created_at).with_for_update()
                              .execution_options(populate_existing=True))
     if conversation is None:
-        conversation = Conversation(title=title, owner_id=user.id, group_id=group.id if group else None)
+        from . import agents
+        conversation = Conversation(title=title, owner_id=user.id, group_id=group.id if group else None,
+                                    agent=agents.resolve(user))
         db.add(conversation)
         db.flush()
     if not policy.can_read_conversation(db, user, conversation) or not policy.can_send_conversation(db, user, conversation):
@@ -239,10 +241,16 @@ def _enqueue(db, provider, event_id, sender_id, chat_id, content, is_group, repl
             return {'ok': True, 'approval': decision.verb}
         content, busy = handled.continuation, False
     else:
-        command = None if attachment_refs else im_commands.parse(content)
+        command, argument = (None, '') if attachment_refs else im_commands.split(content)
         if command:
-            im_commands.handle(db, command, provider, event, user, group, conversation)
+            im_commands.handle(db, command, provider, event, user, group, conversation, argument)
             return {'ok': True, 'command': command}
+    from . import agents
+    if conversation.agent not in agents.enabled():
+        label = agents.LABELS.get(conversation.agent, conversation.agent)
+        db.add(IMOutbox(event_id=event.id, text=f'本会话使用的 {label} 当前未启用。发送 /agent {agents.default()} 切换后再试，或联系管理员。'))
+        db.flush()
+        return {'ok': True, 'agent_disabled': True}
     if busy:
         # Without this the ingress failed with 409, the user saw nothing and the platform redelivered the event later.
         db.add(IMOutbox(event_id=event.id, text=BUSY))

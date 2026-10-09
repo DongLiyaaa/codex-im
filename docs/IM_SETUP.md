@@ -14,6 +14,8 @@
 
 推荐在 API 与 IM 进程的受保护环境中配置同一 `IM_CONFIG_KEY`（Fernet 32字节随机密钥的 URL-safe Base64，可用 `.venv/bin/python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'` 生成，仅保存到0600配置文件）。未配置时，从至少32字符的 `SESSION_SECRET` 以独立域标签 SHA-256 派生。密钥不得存入数据库或网页。修改 IM_CONFIG_KEY 或派生源 SESSION_SECRET 会使旧密文不可读，必须先用旧密钥受控解密并以新密钥重新加密，同时更新所有进程；当前没有自动轮换工具。不可解密时失败关闭，不回退旧环境凭据。
 
+**选择 Agent**：启用了不止一个 Agent（`HUB_AGENTS=codex,claude`）时，在飞书/钉钉里发 `/agent` 查看当前 Agent，发 `/agent claude` 或 `/agent codex` 切换。切换会归档当前会话并开启绑定新 Agent 的新会话，上下文不互通；私聊的选择会记为个人偏好，群里切换需要群管理权限且不改变个人偏好。`/new` 不改变会话的 Agent。会话绑定的 Agent 被停用时，机器人会提示联系管理员，不会改用别的 Agent 执行。
+
 保存配置不会自行安装或启动独立进程；每个平台必须按下方命令启动一个监督器。启动后即使未配置，也在本地等待配置，**不会建立外部连接**。刷新「服务连接状态」查看实际心跳。未提供“测试连接”按钮；连接状态不是发送权限验收，网页保存不会发送测试消息。
 
 ## 管理员在对话内配置个人 OAuth 应用

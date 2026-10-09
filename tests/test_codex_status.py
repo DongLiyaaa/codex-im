@@ -178,3 +178,25 @@ def test_a_deactivated_super_administrator_is_refused(database, monkeypatch):
             db.scalar(select(User).where(User.email == 'root@example.invalid')).active = False
         assert boss.get('/api/system/codex-status').status_code in (401, 403)
         assert seen == []
+
+
+def test_claude_agent_facts_are_passed_through_and_filtered(monkeypatch):
+    claude = {'enabled': True, 'ready': True, 'installed': True, 'version': '2.1.286', 'pinned_version': '2.1.286',
+              'model': {'id': 'claude-x', 'endpoint_host': 'gateway.example.com', 'credential_configured': True,
+                        'api_key': CANARY},
+              'config_error': None, 'model_endpoint': {'state': 'ok', 'http_status': 200, 'model_listed': True},
+              'secret': CANARY}
+    body = dict(STATUS, agents={'codex': {'enabled': True, 'ready': True}, 'claude': claude})
+    with server(lambda _: reply(body=body)) as (url, _):
+        result = read(url, monkeypatch)
+    agents = result['runner']['agents']
+    assert agents['codex'] == {'enabled': True, 'ready': True}
+    assert agents['claude']['ready'] and agents['claude']['model']['endpoint_host'] == 'gateway.example.com'
+    assert CANARY not in json.dumps(result)
+
+
+def test_a_disabled_claude_agent_reports_only_its_state(monkeypatch):
+    body = dict(STATUS, agents={'codex': {'enabled': True, 'ready': True}, 'claude': {'enabled': False, 'ready': False}})
+    with server(lambda _: reply(body=body)) as (url, _):
+        result = read(url, monkeypatch)
+    assert result['runner']['agents']['claude']['enabled'] is False and result['runner']['agents']['claude']['model'] is None

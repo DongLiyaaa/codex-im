@@ -4,7 +4,8 @@ export interface User { id: ID; email: string; name: string; role: Role; org_id:
 export interface Group { can_edit?: boolean; can_delete?: boolean; org_name?: string | null; team_name?: string | null; id: ID; name: string; org_id: ID | null; team_id: ID | null; member_ids: ID[]; provider: string; external_id?: string | null }
 export interface Resource { id: ID; name: string; kind: 'skill' | 'mcp'; description: string; org_id: ID | null; team_id?: ID | null; enabled: boolean; config: Record<string, unknown>; can_manage?: boolean; grants?: { subject_type: Binding['subject_type']; subject_id: ID }[] }
 export interface Binding { id: ID; subject_type: 'user' | 'group' | 'team' | 'org'; subject_id: ID; resource_id: ID }
-export interface Conversation { can_delete?: boolean; id: ID; title: string; owner_id: ID; group_id?: ID | null; created_at: string }
+export interface Conversation { can_delete?: boolean; id: ID; title: string; owner_id: ID; group_id?: ID | null; agent?: string; created_at: string }
+export interface AgentOptions { agents: { id: string; label: string }[]; default: string; preferred: string }
 export interface Attachment { id: string; filename: string; size: number; mime: string; status: 'received' | 'fetching' | 'parsing' | 'ready' | 'failed' | 'revoked'; error?: string | null }
 export interface Message { platform_authorization?: { provider: 'feishu' | 'dingtalk'; state: string; can_open: boolean } | null; attachments?: Attachment[]; id: ID; conversation_id: ID; role: string; content: string; created_at: string }
 export interface Run { id: ID; message_id: ID; provider?: 'web' | 'feishu' | 'dingtalk'; status: 'waiting_attachments' | 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'; error?: string; created_at: string }
