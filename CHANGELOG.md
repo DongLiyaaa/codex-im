@@ -2,6 +2,10 @@
 
 版本号对应 GitHub 上的发布和 `ghcr.io/dongliyaaa/codex-im-*` 镜像标签（例如 `v-0.0.3`）。
 
+## 未发布
+
+- 新增 MIT 许可证（LICENSE）；镜像元数据的许可证由 `NOASSERTION` 改为 `MIT`，下次构建镜像生效。
+
 ## v-0.0.3 — 2026-10-09
 
 ### 新增
