@@ -17,9 +17,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY main.py sandbox_probe.py ./
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 USER 10001:10001
-ARG VERSION=0.0.2
+ARG VERSION=0.0.3
 LABEL org.opencontainers.image.source="https://github.com/DongLiyaaa/codex-im" \
-      org.opencontainers.image.description="Agent Hub Codex 执行服务（Runner）" \
+      org.opencontainers.image.description="Agent Hub 执行服务（Runner，Codex CLI 与可选 Claude CLI）" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.licenses="NOASSERTION"
 EXPOSE 8081

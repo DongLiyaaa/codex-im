@@ -2,7 +2,7 @@
 
 **让团队在网页、飞书、钉钉里，用同一个 AI 助手（Codex）干活，并且谁能用什么、做过什么，都由管理员说了算。**
 
-当前版本：**v-0.0.2**（[更新日志](CHANGELOG.md)）
+当前版本：**v-0.0.3**（[更新日志](CHANGELOG.md)）
 
 ## 它能做什么
 
@@ -43,8 +43,8 @@ docker compose --env-file .env -f deploy/compose.ghcr.yaml up -d
 
 | 组件 | 镜像 | 说明 |
 |---|---|---|
-| API、网页、飞书/钉钉接入进程 | `ghcr.io/dongliyaaa/codex-im-api:v-0.0.2` | linux/amd64 |
-| Codex 执行服务 | `ghcr.io/dongliyaaa/codex-im-runner:v-0.0.2` | linux/amd64 |
+| API、网页、飞书/钉钉接入进程 | `ghcr.io/dongliyaaa/codex-im-api:v-0.0.3` | linux/amd64 |
+| 执行服务（Codex，可选 Claude） | `ghcr.io/dongliyaaa/codex-im-runner:v-0.0.3` | linux/amd64 |
 | 数据库 | `postgres:16.14-bookworm` | 官方镜像，随 compose 一起拉取 |
 
 - 部署文件 `deploy/compose.ghcr.yaml` 与源码构建用的 `compose.yaml` 内容一致，只是把"本地构建"换成"拉取镜像"。项目名是 `codex-im-packages`，**不会复用**源码构建版的数据库，也不是旧实例的原地升级。

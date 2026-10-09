@@ -41,7 +41,7 @@ services:
     mem_limit: 768m
     cpus: 1
   api:
-    image: ${CODEX_IM_API_IMAGE:-ghcr.io/dongliyaaa/codex-im-api:v-0.0.2}
+    image: ${CODEX_IM_API_IMAGE:-ghcr.io/dongliyaaa/codex-im-api:v-0.0.3}
     platform: linux/amd64
     environment:
       <<: *attachment_limits
@@ -102,7 +102,7 @@ services:
     cpus: 1
   attachments:
     # Same image as the API; parsing never runs inside the API or the IM processes.
-    image: ${CODEX_IM_API_IMAGE:-ghcr.io/dongliyaaa/codex-im-api:v-0.0.2}
+    image: ${CODEX_IM_API_IMAGE:-ghcr.io/dongliyaaa/codex-im-api:v-0.0.3}
     platform: linux/amd64
     command: [python, -m, app.attachment_worker]
     environment:
@@ -128,7 +128,7 @@ services:
     pids_limit: 128
   im-feishu:
     profiles: [im]
-    image: ${CODEX_IM_API_IMAGE:-ghcr.io/dongliyaaa/codex-im-api:v-0.0.2}
+    image: ${CODEX_IM_API_IMAGE:-ghcr.io/dongliyaaa/codex-im-api:v-0.0.3}
     platform: linux/amd64
     command: [python, -m, app.im_connections, --provider, feishu]
     environment:
@@ -154,7 +154,7 @@ services:
     pids_limit: 64
   im-dingtalk:
     profiles: [im]
-    image: ${CODEX_IM_API_IMAGE:-ghcr.io/dongliyaaa/codex-im-api:v-0.0.2}
+    image: ${CODEX_IM_API_IMAGE:-ghcr.io/dongliyaaa/codex-im-api:v-0.0.3}
     platform: linux/amd64
     command: [python, -m, app.im_connections, --provider, dingtalk]
     environment:
@@ -180,7 +180,7 @@ services:
     cpus: 0.5
     pids_limit: 64
   runner:
-    image: ${CODEX_IM_RUNNER_IMAGE:-ghcr.io/dongliyaaa/codex-im-runner:v-0.0.2}
+    image: ${CODEX_IM_RUNNER_IMAGE:-ghcr.io/dongliyaaa/codex-im-runner:v-0.0.3}
     platform: linux/amd64
     environment:
       RUNNER_TOKEN: ${RUNNER_TOKEN:?Set RUNNER_TOKEN}
