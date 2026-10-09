@@ -140,14 +140,16 @@ def enqueue_message(db, user, conversation, content, attachment_ids=None):
     message = Message(conversation_id=conversation.id, role='user', content=content)
     db.add(message)
     db.flush()
-    run = Run(conversation_id=conversation.id, user_id=user.id, message_id=message.id)
+    from . import agents
+    run = Run(conversation_id=conversation.id, user_id=user.id, message_id=message.id,
+              agent=agents.require_enabled(conversation.agent))
     db.add(run)
     db.flush()
     from .attachments import claim, for_message
     claim(db, user, conversation, message, run, body.attachment_ids)
     db.flush()
     build_payload(db, run, check_attachments=False)
-    audit(db, user, 'message.enqueue', conversation.id, {'run_id': run.id})
+    audit(db, user, 'message.enqueue', conversation.id, {'run_id': run.id, 'agent': run.agent})
     message_result = schemas.MessageOut.model_validate(message).model_dump(mode='json')
     message_result['attachments'] = for_message(db, message.id)
     return {'user_message': message_result,
@@ -191,6 +193,9 @@ def build_payload(db, run, check_attachments=True):
         parts.append(piece)
         remaining -= len(piece)
     payload = {'run_id': run.id, 'conversation_id': conversation.id, 'prompt': '\n\n'.join(reversed(parts)), 'skills': skills, 'mcps': mcps}
+    if run.agent != 'codex':
+        # Codex payloads stay byte-identical to before, so an older runner keeps working for Codex.
+        payload['agent'] = run.agent
     if check_attachments:
         from .attachments import run_attachments, public
         attached = run_attachments(db, run)
@@ -235,7 +240,11 @@ def execute_run(run_id):
             raise RuntimeError('RUNNER_TOKEN is not configured')
         with httpx.Client(timeout=190, follow_redirects=False, trust_env=False) as client:
             with client.stream('POST', runner_url + '/execute', json=payload, headers={'Authorization': f'Bearer {token}'}) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    reason = runner_reason(response, payload.get('agent', 'codex'))
+                    if reason:
+                        raise RuntimeError(reason)
+                    response.raise_for_status()
                 data = bytearray()
                 for chunk in response.iter_bytes():
                     data.extend(chunk)
@@ -257,7 +266,7 @@ def execute_run(run_id):
                 raise RuntimeError('Resource grants changed during execution')
             db.add(Message(conversation_id=run.conversation_id, role='assistant', content=result['text']))
             run.status = 'succeeded'
-            audit(db, db.get(User, run.user_id), 'run.succeeded', run.id)
+            audit(db, db.get(User, run.user_id), 'run.succeeded', run.id, {'agent': run.agent})
         deliver(run_id, result['text'])
     except Exception as exc:
         # Upstream bodies and URLs can contain credentials: expose only controlled errors.
@@ -280,6 +289,35 @@ def execute_run(run_id):
     finally:
         from .im_reactions import process
         process(run_id)
+
+
+# Static runner codes -> short reasons. Shared codes (timeouts, limits) are only translated for Claude runs, so Codex
+# failures read exactly as before.
+CLAUDE_REASONS = {
+    'CLAUDE_API_KEY_NOT_CONFIGURED': 'Claude CLI 未配置 API Key',
+    'INVALID_CLAUDE_MODEL': 'Claude CLI 模型配置无效', 'INVALID_CLAUDE_BASE_URL': 'Claude CLI 地址配置无效',
+    'CLAUDE_CLI_NOT_INSTALLED': 'Claude CLI 未安装',
+    'CLAUDE_EXECUTION_FAILED': 'Claude CLI 执行失败', 'CLAUDE_NO_FINAL_RESPONSE': '模型没有返回内容',
+    'CLAUDE_MCP_UNAVAILABLE': '所需工具连接失败', 'CLAUDE_INIT_INVALID': 'Claude CLI 工具校验未通过',
+    'CLAUDE_UNEXPECTED_MCP': 'Claude CLI 工具校验未通过', 'CLAUDE_UNEXPECTED_TOOLS': 'Claude CLI 工具校验未通过',
+    'ATTACHMENT_IMAGE_LIMIT': '图片超过 Claude 的大小限制', 'RUN_TIMEOUT': '执行超时',
+    'RESPONSE_LIMIT_EXCEEDED': '回复内容超过上限', 'RUNNER_BUSY': '执行服务繁忙',
+}
+
+
+def runner_reason(response, agent):
+    body = bytearray()
+    for chunk in response.iter_bytes():
+        body.extend(chunk)
+        if len(body) > 4096:
+            return None
+    try:
+        code = json.loads(body).get('detail')
+    except (ValueError, AttributeError):
+        return None
+    if code == 'AGENT_NOT_ENABLED':
+        return '所选 Agent 在执行服务中未启用'
+    return CLAUDE_REASONS.get(code) if agent == 'claude' and isinstance(code, str) else None
 
 
 FAILURE_REASONS = {

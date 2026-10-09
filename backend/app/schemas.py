@@ -160,6 +160,11 @@ class IdentityCreate(Input):
 class ConversationCreate(Input):
     title: str = Field(min_length=1, max_length=200)
     group_id: str | None = Field(default=None, min_length=1, max_length=36)
+    agent: str | None = Field(default=None, pattern=r'^(codex|claude)$')
+
+
+class AgentPreference(Input):
+    agent: str = Field(pattern=r'^(codex|claude)$')
 
 
 class MessageCreate(Input):
@@ -212,6 +217,7 @@ class ConversationOut(Output):
     title: str
     owner_id: str
     group_id: str | None
+    agent: str = 'codex'
     created_at: datetime
 
 

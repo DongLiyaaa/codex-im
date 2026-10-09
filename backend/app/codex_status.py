@@ -47,6 +47,27 @@ class Endpoint(BaseModel):
     reason: str | None = Field(None, max_length=60)
 
 
+class AgentFlag(BaseModel):
+    enabled: bool
+    ready: bool
+
+
+class ClaudeStatus(BaseModel):
+    enabled: bool
+    ready: bool
+    installed: bool = False
+    version: str | None = Field(None, max_length=40)
+    pinned_version: str | None = Field(None, max_length=40)
+    model: Model | None = None
+    config_error: str | None = Field(None, max_length=60)
+    model_endpoint: Endpoint | None = None
+
+
+class Agents(BaseModel):
+    codex: AgentFlag
+    claude: ClaudeStatus
+
+
 class RunnerStatus(BaseModel):
     ready: bool
     checked_at: int
@@ -56,6 +77,8 @@ class RunnerStatus(BaseModel):
     config_error: str | None = Field(None, max_length=60)
     sandbox: Sandbox
     model_endpoint: Endpoint
+    # Absent when talking to a runner from before Claude CLI support: Codex-only, nothing else to show.
+    agents: Agents | None = None
 
 
 def failure(code):
@@ -86,7 +109,8 @@ def check(refresh=False):
         status = RunnerStatus.model_validate_json(body)
     except ValidationError:
         return failure('RUNNER_INVALID_RESPONSE')
-    return {'reachable': True, 'error': None, 'runner': status.model_dump()}
+    return {'reachable': True, 'error': None,
+            'runner': status.model_dump(exclude={'agents'} if status.agents is None else None)}
 
 
 @router.get('/codex-status')

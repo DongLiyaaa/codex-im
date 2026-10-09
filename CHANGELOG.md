@@ -2,6 +2,18 @@
 
 版本号对应 GitHub 上的发布和 `ghcr.io/dongliyaaa/codex-im-*` 镜像标签（例如 `v-0.0.2`）。
 
+## 未发布
+
+### 新增
+
+- **Claude CLI 作为第二个可选 Agent，与 Codex CLI 并列。** 默认仍只启用 Codex，行为不变；设置 `HUB_AGENTS=codex,claude` 并填写 `CLAUDE_API_KEY` 后启用（仅支持 API Key）。网页新建会话时可选 Agent，飞书、钉钉里用 `/agent` 查看或切换。每个会话固定绑定一个 Agent，上下文不互通；个人平台授权、资源范围、Skill、附件与图片、审批、审计、`/stop`、超时与输出限制两个 Agent 一致。
+- 首页「接入检查」在启用 Claude 后增加 Claude CLI 检查项。
+
+### 升级须知
+
+- API 启动时给会话表、任务表补加 `agent` 列（默认 codex），给用户表补加可空的 `preferred_agent` 列；已有会话和任务按 Codex 处理，不删除数据；先更新 API，再更新 Runner。旧版 Runner 仍可配合新 API 使用（Codex 请求内容不变），但不支持 Claude。
+- Runner 镜像会多装一个 Claude CLI，需要重新构建或拉取新镜像。
+
 ## v-0.0.2 — 2026-10-08
 
 相比 v-0.0.1，这一版补上了 IM 里真正干活所需的大部分能力。
