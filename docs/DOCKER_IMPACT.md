@@ -70,7 +70,7 @@ docker compose --env-file .env.docker -f compose.yaml -f compose.runner-arm64.ya
 |项目|内容|对已有环境的影响|
 |---|---|---|
 |项目名|`codex-im-packages`|与源码构建版 `codex-hub-v1` 是两个互不相干的实例|
-|镜像|`ghcr.io/dongliyaaa/codex-im-api:v-0.0.2`、`ghcr.io/dongliyaaa/codex-im-runner:v-0.0.2`、`postgres:16.14-bookworm`|只新增标签；镜像为私有，拉取前需 `docker login ghcr.io`（令牌只需 `read:packages`）|
+|镜像|`ghcr.io/dongliyaaa/codex-im-api:v-0.0.3`、`ghcr.io/dongliyaaa/codex-im-runner:v-0.0.3`、`postgres:16.14-bookworm`|只新增标签；镜像为私有，拉取前需 `docker login ghcr.io`（令牌只需 `read:packages`）|
 |网络|`codex-im-packages_hub_data`（internal）、`codex-im-packages_hub_runner`（internal）、`codex-im-packages_hub_egress`|新网络，不加入任何已有网络|
 |卷|`codex-im-packages_hub_pgdata`、`codex-im-packages_hub_attachments`|新卷，不读取已有卷；不会接管源码构建版的数据|
 |端口|默认 `127.0.0.1:18200`，可用 `HUB_BIND`、`HUB_PORT` 修改|与源码构建版同时运行时，先把其中一个改成不同端口|
