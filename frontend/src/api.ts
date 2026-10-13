@@ -1,6 +1,6 @@
 export type ID = string | number;
 export type Role = 'super_admin' | 'org_admin' | 'team_lead' | 'member';
-export interface User { id: ID; email: string; name: string; role: Role; org_id: ID | null; team_id: ID | null; active: boolean; login_enabled?: boolean; can_manage?: boolean; im_channels?: string[] }
+export interface User { id: ID; email: string; name: string; avatar?: string | null; role: Role; org_id: ID | null; team_id: ID | null; active: boolean; login_enabled?: boolean; can_manage?: boolean; im_channels?: string[] }
 export interface Group { can_edit?: boolean; can_delete?: boolean; org_name?: string | null; team_name?: string | null; id: ID; name: string; org_id: ID | null; team_id: ID | null; member_ids: ID[]; provider: string; external_id?: string | null }
 export interface Resource { id: ID; name: string; kind: 'skill' | 'mcp'; description: string; org_id: ID | null; team_id?: ID | null; enabled: boolean; config: Record<string, unknown>; can_manage?: boolean; grants?: { subject_type: Binding['subject_type']; subject_id: ID }[] }
 export interface Binding { id: ID; subject_type: 'user' | 'group' | 'team' | 'org'; subject_id: ID; resource_id: ID }

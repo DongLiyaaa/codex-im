@@ -1,0 +1,11 @@
+.settings-card { max-width: 560px; background: var(--surface); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); padding: 28px; }
+.settings-avatar { display: flex; align-items: center; gap: 20px; margin-bottom: 24px; }
+.settings-avatar-preview .avatar { width: 88px; height: 88px; font-size: var(--fs-title1); }
+.settings-avatar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0; }
+.settings-avatar-actions small { flex-basis: 100%; color: var(--text-3); font-size: var(--fs-caption); }
+.settings-card input:disabled { color: var(--text-3); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); border: 0; }
+@media (max-width: 720px) {
+  .settings-card { padding: 20px; }
+  .settings-avatar { align-items: flex-start; flex-direction: column; }
+}

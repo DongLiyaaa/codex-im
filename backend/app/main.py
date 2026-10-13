@@ -14,6 +14,7 @@ from .db import engine, SessionLocal, get_db
 from .models import Base, User, Group, Resource, Binding, Conversation, Message, Run, Audit, Identity, SessionToken, now
 from .security import current_user, hash_password, verify_password, token_hash, session_secret, rate_limit
 from . import agents, policy, resource_secrets, schemas, service, im_settings
+from .im_nicknames import clean
 
 
 @asynccontextmanager
@@ -155,6 +156,25 @@ def logout(request: Request, response: Response, db=Depends(get_db, scope='funct
 @app.get('/api/auth/me', response_model=schemas.UserOut)
 def me(actor=Depends(current_user)):
     return actor
+
+
+@app.patch('/api/auth/me', response_model=schemas.UserOut)
+def update_profile(body: schemas.ProfileUpdate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
+    user = db.get(User, actor.id)
+    changed = []
+    if 'name' in body.model_fields_set:
+        name = clean(body.name)
+        if not name:
+            raise HTTPException(400, 'Member name required')
+        if name != user.name:
+            user.name = name
+            changed.append('name')
+    if 'avatar' in body.model_fields_set and body.avatar != user.avatar:
+        user.avatar = body.avatar
+        changed.append('avatar')
+    if changed:
+        service.audit(db, user, 'user.profile_update', user.id, {'fields': changed})
+    return user_out(user, user)
 
 
 def user_out(actor, user, channels=None):

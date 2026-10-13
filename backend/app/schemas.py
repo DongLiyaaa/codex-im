@@ -1,3 +1,4 @@
+import base64
 from datetime import datetime
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -56,6 +57,39 @@ class UserCreate(Login):
 
 
 PLACEMENT = {'role', 'org_id', 'team_id'}
+
+
+AVATAR_MAX_CHARS = 100_000
+AVATAR_SIGNATURES = (b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff', b'RIFF')
+
+
+class ProfileUpdate(Input):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    avatar: str | None = Field(default=None, max_length=AVATAR_MAX_CHARS)
+
+    @field_validator('avatar')
+    @classmethod
+    def raster_data_url(cls, value):
+        if value is None:
+            return value
+        head, _, payload = value.partition(',')
+        if head not in ('data:image/png;base64', 'data:image/jpeg;base64', 'data:image/webp;base64'):
+            raise ValueError('Avatar must be a PNG, JPEG or WebP data URL')
+        try:
+            raw = base64.b64decode(payload, validate=True)
+        except ValueError:
+            raise ValueError('Avatar is not valid base64')
+        if not raw.startswith(AVATAR_SIGNATURES) or (raw.startswith(b'RIFF') and raw[8:12] != b'WEBP'):
+            raise ValueError('Avatar content is not a PNG, JPEG or WebP image')
+        return value
+
+    @model_validator(mode='after')
+    def something(self):
+        if not self.model_fields_set & {'name', 'avatar'}:
+            raise ValueError('Nothing to update')
+        if 'name' in self.model_fields_set and self.name is None:
+            raise ValueError('Name cannot be empty')
+        return self
 
 
 class UserUpdate(Input):
@@ -193,6 +227,7 @@ class UserOut(Output):
     team_id: str | None
     active: bool
     login_enabled: bool = True
+    avatar: str | None = None
     can_manage: bool = False
     im_channels: list[str] = []
 

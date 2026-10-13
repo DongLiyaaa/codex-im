@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { Page } from './Management';
 import type { User } from './api';
 export type Route = { page: Page; conversationId: string | null };
-const pages = new Set(['directory', 'overview', 'chat', 'users', 'groups', 'resources', 'bindings', 'integrations', 'audit']);
+const pages = new Set(['directory', 'overview', 'chat', 'users', 'groups', 'resources', 'bindings', 'integrations', 'audit', 'settings']);
 export function readRoute(hash = window.location.hash): Route {
   if (hash === '#/connections') return { page: 'chat', conversationId: null };
   const match = /^#\/([^/?]+)(?:\/([^/?]+))?$/.exec(hash);

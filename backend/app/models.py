@@ -56,6 +56,7 @@ class User(Base):
     team_id: Mapped[str | None] = mapped_column(String(100), index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     preferred_agent: Mapped[str | None] = mapped_column(String(20))
+    avatar: Mapped[str | None] = mapped_column(Text)
 
     @property
     def login_enabled(self) -> bool:

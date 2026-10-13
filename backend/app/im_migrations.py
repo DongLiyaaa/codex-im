@@ -17,6 +17,7 @@ def migrate(engine):
         conn.execute(text("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS agent VARCHAR(20) NOT NULL DEFAULT 'codex'"))
         conn.execute(text("ALTER TABLE runs ADD COLUMN IF NOT EXISTS agent VARCHAR(20) NOT NULL DEFAULT 'codex'"))
         conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_agent VARCHAR(20)'))
+        conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT'))
         conn.execute(text('ALTER TABLE organizations ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ'))
         conn.execute(text('ALTER TABLE departments ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ'))
         conn.execute(text('ALTER TABLE groups ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ'))

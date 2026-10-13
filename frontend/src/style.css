@@ -248,6 +248,13 @@ nav button.active { background: var(--fill-strong); font-weight: 500; }
   border-radius: 50%; font-size: var(--fs-callout); font-weight: 500;
 }
 .avatar.small { width: 32px; height: 32px; font-size: var(--fs-footnote); }
+.avatar { overflow: hidden; }
+.avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.profile-link { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 6px; margin: -6px; border: 0; background: none; color: inherit; font: inherit; text-align: left; border-radius: var(--radius-sm); cursor: pointer; }
+.profile-link > div { flex: 1; min-width: 0; overflow-wrap: anywhere; line-height: 1.35; }
+.profile-link:hover { background: var(--fill); }
+.avatar-button { padding: 0; border: 0; background: none; border-radius: 50%; cursor: pointer; display: inline-flex; transition: opacity .15s; }
+.avatar-button:hover { opacity: .8; }
 
 .workspace { margin-left: var(--sidebar-w); min-width: 0; flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
 .topbar {

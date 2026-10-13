@@ -392,3 +392,37 @@ def test_archive_migration_existing_and_new_schema(env):
     migrate(engine)
     migrate(engine)
     assert {'archived_at','archived_by'} <= {c['name'] for c in inspect(engine).get_columns('conversations')}
+
+
+PNG_PIXEL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=='
+
+
+def test_profile_update_changes_only_own_name_and_avatar(env):
+    factory, people, auth = env
+    client = auth('member')
+    done = client.patch('/api/auth/me', json={'name': '  新名字  ', 'avatar': PNG_PIXEL})
+    assert done.status_code == 200 and done.json()['name'] == '新名字' and done.json()['avatar'] == PNG_PIXEL
+    with factory() as db:
+        assert db.get(m.User, people['member'].id).avatar == PNG_PIXEL
+    # Name only: the avatar stays; avatar null removes it without touching the name.
+    assert client.patch('/api/auth/me', json={'name': '再改一次'}).json()['avatar'] == PNG_PIXEL
+    removed = client.patch('/api/auth/me', json={'avatar': None}).json()
+    assert removed['avatar'] is None and removed['name'] == '再改一次'
+    with factory() as db:
+        assert db.get(m.User, people['peer_member'].id).name == 'peer_member'
+        audits = db.scalars(select(m.Audit).where(m.Audit.action == 'user.profile_update')).all()
+        assert audits and all('新名字' not in str(a.details) and PNG_PIXEL not in str(a.details) for a in audits)
+
+
+@pytest.mark.parametrize('body', [
+    {}, {'name': ''}, {'name': None}, {'name': '   '}, {'role': 'super_admin'}, {'active': False},
+    {'avatar': 'data:image/svg+xml;base64,PHN2Zy8+'}, {'avatar': 'https://example.com/a.png'},
+    {'avatar': 'data:image/png;base64,bm90IGFuIGltYWdl'}, {'avatar': 'data:image/png;base64,!!!'},
+    {'avatar': 'data:image/png;base64,' + 'A' * 100_000},
+])
+def test_profile_update_rejects_bad_input(env, body):
+    factory, people, auth = env
+    assert auth('member').patch('/api/auth/me', json=body).status_code in (400, 422)
+    with factory() as db:
+        user = db.get(m.User, people['member'].id)
+        assert user.name == 'member' and user.avatar is None and user.role == 'member' and user.active
