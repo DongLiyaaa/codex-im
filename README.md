@@ -2,7 +2,7 @@
 
 **把 Codex CLI、Claude Code CLI 变成全团队都能放心用的 AI 同事：员工在飞书、钉钉、网页里直接提需求，管理员按组织、部门分配它能用哪些 Skill 和工具，谁用了什么、做了什么，全程可查。**
 
-当前版本：**v-0.0.3**（[更新日志](CHANGELOG.md)）
+当前版本：**v-0.0.4**（[更新日志](CHANGELOG.md)）
 
 命令行里的 AI 编程助手很强，但没法直接交给整个团队：不是每个人都会用终端，一把共享密钥管不住权限，出了事也查不到是谁做的。Agent Hub 就是补上这一层——**员工用聊天软件提需求，管理员用一套权限和审计管住边界，模型和数据都留在你自己的服务器上。**
 
@@ -49,8 +49,8 @@ docker compose --env-file .env -f deploy/compose.ghcr.yaml up -d
 
 | 组件 | 镜像 | 说明 |
 |---|---|---|
-| API、网页、飞书/钉钉接入进程 | `ghcr.io/dongliyaaa/codex-im-api:v-0.0.3` | linux/amd64 |
-| 执行服务（Codex，可选 Claude） | `ghcr.io/dongliyaaa/codex-im-runner:v-0.0.3` | linux/amd64 |
+| API、网页、飞书/钉钉接入进程 | `ghcr.io/dongliyaaa/codex-im-api:v-0.0.4` | linux/amd64 |
+| 执行服务（Codex，可选 Claude） | `ghcr.io/dongliyaaa/codex-im-runner:v-0.0.4` | linux/amd64 |
 | 数据库 | `postgres:16.14-bookworm` | 官方镜像，随 compose 一起拉取 |
 
 - 部署文件 `deploy/compose.ghcr.yaml` 与源码构建用的 `compose.yaml` 内容一致，只是把"本地构建"换成"拉取镜像"。项目名是 `codex-im-packages`，**不会复用**源码构建版的数据库，也不是旧实例的原地升级。
