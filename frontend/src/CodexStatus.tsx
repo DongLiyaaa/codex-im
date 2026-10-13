@@ -21,7 +21,7 @@ export interface ClaudeAgentStatus {
 }
 export interface CodexStatusResult { reachable: boolean; error: string | null; runner: CodexRunnerStatus | null }
 type Tone = 'ok' | 'fail' | 'idle';
-interface Row { name: string; tone: Tone; detail: string }
+interface Row { name: string; tone: Tone; detail: string; badge?: string }
 
 const runnerErrors: Record<string, string> = {
   RUNNER_UNREACHABLE: '连不上执行器，请确认 runner 服务已经启动。',
@@ -127,9 +127,11 @@ export function claudeRows(claude: ClaudeAgentStatus): Row[] {
   return rows;
 }
 
+const claudeDisabledRow: Row = { name: 'Claude CLI', tone: 'idle', badge: '未启用', detail: '当前只启用了 Codex。需要同时使用 Claude 时，在部署配置里设置 HUB_AGENTS=codex,claude 并填写 CLAUDE_API_KEY，然后重启执行器。' };
+
 function Checks({ label, rows }: { label: string; rows: Row[] }) {
   return <ul className="codex-check" aria-label={label}>
-    {rows.map(row => { const Mark = Icon[row.tone]; const state = toneBadge[row.tone]; return <li className="codex-check-row" key={row.name}>
+    {rows.map(row => { const Mark = Icon[row.tone]; const state = { ...toneBadge[row.tone], ...(row.badge ? { text: row.badge } : {}) }; return <li className="codex-check-row" key={row.name}>
       <Mark size={18} className={row.tone} aria-hidden="true"/>
       <span className="codex-check-name">{row.name}</span>
       <span className="codex-check-detail">{row.detail}</span>
@@ -156,6 +158,10 @@ export function CodexStatus() {
     <Feedback error={error || (data && !valid ? '检查结果的格式无法识别。' : '')}/>
     {loading ? <Loading/> : valid && <>
       <Checks label="Codex CLI 检查项" rows={codexRows(data)}/>
+      {data.runner && !data.runner.agents?.claude?.enabled && <>
+        <div className="section-heading"><h2>Claude CLI 接入检查</h2><Badge>未启用</Badge></div>
+        <Checks label="Claude CLI 检查项" rows={[claudeDisabledRow]}/>
+      </>}
       {data.runner?.agents?.claude?.enabled && <>
         <div className="section-heading"><h2>Claude CLI 接入检查</h2><Badge tone={data.runner.agents.claude.ready ? 'green' : 'red'}>{data.runner.agents.claude.ready ? '可用' : '不可用'}</Badge></div>
         <Checks label="Claude CLI 检查项" rows={claudeRows(data.runner.agents.claude)}/>

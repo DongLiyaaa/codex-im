@@ -149,3 +149,19 @@ it('does not break the rest of the home page when the check fails', async () => 
   expect(await screen.findByText('可见用户')).toBeTruthy();
   expect(screen.getByText('从这里开始')).toBeTruthy();
 });
+
+it('shows Claude as not enabled, with how to enable it, when the runner serves Codex only', async () => {
+  answer(result());
+  render(<CodexStatus/>);
+  expect(await screen.findByText('Claude CLI 接入检查')).toBeTruthy();
+  const row = rowOf('Claude CLI');
+  expect(within(row).getByText('未启用')).toBeTruthy();
+  expect(within(row).getByText(/HUB_AGENTS=codex,claude/)).toBeTruthy();
+});
+
+it('shows the Claude checks instead of the hint once Claude is enabled', async () => {
+  answer(result({ agents: { codex: { enabled: true, ready: true }, claude: { enabled: true, ready: true, installed: true, version: '2.1.286', pinned_version: '2.1.286', model: { id: null, endpoint_host: null, credential_configured: true }, model_endpoint: { state: 'skipped', http_status: null, model_listed: null, reason: 'NO_CUSTOM_ENDPOINT' } } } }));
+  render(<CodexStatus/>);
+  expect(await screen.findByText('已安装 2.1.286。')).toBeTruthy();
+  expect(screen.queryByText('未启用')).toBeNull();
+});
