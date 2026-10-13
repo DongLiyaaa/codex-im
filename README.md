@@ -30,8 +30,7 @@ docker compose --env-file .env -f deploy/compose.ghcr.yaml up -d
 
 然后在本机浏览器打开 http://127.0.0.1:18200，**第一个注册的账号就是超级管理员**，请在对外开放之前自己先完成注册。
 
-镜像是私有的，拉取前需要登录一次（令牌只需要 `read:packages` 权限）：
-`gh auth token | docker login ghcr.io -u 你的GitHub用户名 --password-stdin`。
+镜像是公开的，不需要登录就能直接拉取。
 
 想从源码构建、不用 Docker 运行，或要接入飞书/钉钉，看下面各章，按需阅读即可。
 
