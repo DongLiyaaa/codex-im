@@ -59,6 +59,14 @@ class UserCreate(Login):
 PLACEMENT = {'role', 'org_id', 'team_id'}
 
 
+class PasswordReset(Input):
+    password: str = Field(min_length=12, max_length=1024)
+
+
+class OpenPasswordReset(Login):
+    password: str = Field(min_length=12, max_length=1024)
+
+
 AVATAR_MAX_CHARS = 100_000
 AVATAR_SIGNATURES = (b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff', b'RIFF')
 

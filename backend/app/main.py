@@ -75,7 +75,7 @@ async def guard_origin(request: Request, call_next):
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request, exc):
-    if request.url.path.startswith('/api/setup') or request.url.path == '/api/auth/login':
+    if request.url.path.startswith('/api/setup') or request.url.path in ('/api/auth/login', '/api/auth/password-reset'):
         return JSONResponse({'detail': 'Invalid authentication request'}, status_code=422)
     if request.url.path.startswith(('/api/integrations/config/', '/api/integrations/oauth/')):
         return JSONResponse({'detail': 'Invalid IM configuration request'}, status_code=422)
@@ -153,6 +153,31 @@ def logout(request: Request, response: Response, db=Depends(get_db, scope='funct
     return {'ok': True}
 
 
+def open_password_reset():
+    # Anyone who can reach the login page can then reset any web account, so it is off unless the operator turns it on.
+    return os.getenv('OPEN_PASSWORD_RESET', '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+@app.get('/api/auth/password-reset')
+def password_reset_status():
+    return {'enabled': open_password_reset()}
+
+
+@app.post('/api/auth/password-reset')
+def reset_forgotten_password(body: schemas.OpenPasswordReset, request: Request, db=Depends(get_db, scope='function')):
+    from . import user_lifecycle
+    if not open_password_reset():
+        raise HTTPException(404, 'Not found')
+    rate_limit('password-reset:' + (request.client.host if request.client else 'unknown'))
+    target = db.scalar(select(User).where(User.email == body.email).with_for_update())
+    if target is None or not target.login_enabled:
+        raise HTTPException(404, 'Account not found')
+    if not target.active:
+        raise HTTPException(409, 'Account deactivated')
+    user_lifecycle.reset_password(db, None, target, body.password, via='login_page')
+    return {'ok': True}
+
+
 @app.get('/api/auth/me', response_model=schemas.UserOut)
 def me(actor=Depends(current_user)):
     return actor
@@ -210,6 +235,14 @@ def update_user(identifier: str, body: schemas.UserUpdate, actor=Depends(current
     target = user_lifecycle.manageable(db, actor, identifier)
     user_lifecycle.apply(db, actor, target, body)
     return user_out(actor, target)
+
+
+@app.post('/api/users/{identifier}/password')
+def reset_user_password(identifier: str, body: schemas.PasswordReset, actor=Depends(current_user), db=Depends(get_db, scope='function')):
+    from . import user_lifecycle
+    target = user_lifecycle.manageable(db, actor, identifier)
+    user_lifecycle.reset_password(db, actor, target, body.password)
+    return {'ok': True}
 
 
 def group_out(db, actor, group):

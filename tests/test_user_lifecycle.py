@@ -266,3 +266,81 @@ def test_http_administrator_deactivates_a_web_user_whose_session_and_login_stop_
         if staff:
             staff.close()
         main.app.dependency_overrides.clear()
+
+
+def test_http_administrator_resets_a_password_which_ends_old_sessions_and_old_password(database):
+    admin_password, old_password, new_password = (secrets.token_urlsafe(20) for _ in range(3))
+    with database.begin() as db:
+        db.add(User(email='root@example.invalid', name='管理员', role='super_admin', active=True,
+                    password_hash=security.hash_password(admin_password)))
+        member = add_user(db)
+        member.email, member.password_hash = 'staff@example.invalid', security.hash_password(old_password)
+        member_id, locked_id = member.id, add_user(db, locked=True).id
+    boss, staff = http(database), None
+    try:
+        assert boss.post('/api/auth/login', json={'email': 'root@example.invalid', 'password': admin_password}).status_code == 200
+        from fastapi.testclient import TestClient
+        staff = TestClient(main.app)
+        assert staff.post('/api/auth/login', json={'email': 'staff@example.invalid', 'password': old_password}).status_code == 200
+        assert boss.post(f'/api/users/{member_id}/password', json={'password': 'short'}).status_code == 422
+        assert boss.post(f'/api/users/{member_id}/password', json={'password': new_password}).json() == {'ok': True}
+        assert staff.get('/api/auth/me').status_code == 401
+        assert staff.post('/api/auth/login', json={'email': 'staff@example.invalid', 'password': old_password}).status_code == 401
+        assert staff.post('/api/auth/login', json={'email': 'staff@example.invalid', 'password': new_password}).status_code == 200
+        assert boss.post(f'/api/users/{locked_id}/password', json={'password': new_password}).status_code == 409
+        assert boss.post('/api/users/missing/password', json={'password': new_password}).status_code == 404
+        me = boss.get('/api/auth/me').json()
+        assert boss.post(f"/api/users/{me['id']}/password", json={'password': new_password}).status_code == 403
+        # A member can never reset an administrator, nor anyone else.
+        assert staff.post(f"/api/users/{me['id']}/password", json={'password': new_password}).status_code == 403
+    finally:
+        boss.close()
+        if staff:
+            staff.close()
+        main.app.dependency_overrides.clear()
+    with database() as db:
+        assert db.get(User, locked_id).password_hash == LOCKED_PASSWORD
+        trail = audits(db, 'user.password_reset')
+        assert [(a.target_id, a.details) for a in trail] == [(member_id, {'sessions_revoked': 1})]
+        assert new_password not in str(trail[0].details)
+
+
+def test_login_page_password_reset_is_off_by_default_and_when_on_replaces_the_password(database, monkeypatch):
+    old_password, new_password = secrets.token_urlsafe(20), secrets.token_urlsafe(20)
+    with database.begin() as db:
+        member = add_user(db, role='super_admin', org=None, team=None)
+        member.email, member.password_hash = 'owner@example.invalid', security.hash_password(old_password)
+        member_id, locked_id = member.id, add_user(db, locked=True).id
+        stopped = add_user(db)
+        stopped.email, stopped.active = 'stopped@example.invalid', False
+        locked_email = db.get(User, locked_id).email
+        stopped_id = stopped.id
+    monkeypatch.delenv('OPEN_PASSWORD_RESET', raising=False)
+    client = http(database)
+    try:
+        body = {'email': 'owner@example.invalid', 'password': new_password}
+        assert client.get('/api/auth/password-reset').json() == {'enabled': False}
+        assert client.post('/api/auth/password-reset', json=body).status_code == 404
+        monkeypatch.setenv('OPEN_PASSWORD_RESET', 'true')
+        assert client.get('/api/auth/password-reset').json() == {'enabled': True}
+        assert client.post('/api/auth/login', json={'email': 'owner@example.invalid', 'password': old_password}).status_code == 200
+        assert client.post('/api/auth/password-reset', json={**body, 'password': 'short'}).status_code == 422
+        assert client.post('/api/auth/password-reset', json={**body, 'email': 'OWNER@example.invalid'}).json() == {'ok': True}
+        assert client.get('/api/auth/me').status_code == 401
+        assert client.post('/api/auth/login', json={'email': 'owner@example.invalid', 'password': old_password}).status_code == 401
+        assert client.post('/api/auth/login', json=body).status_code == 200
+        assert client.post('/api/auth/password-reset', json={**body, 'email': 'nobody@example.invalid'}).status_code == 404
+        assert client.post('/api/auth/password-reset', json={**body, 'email': locked_email}).status_code == 404
+        assert client.post('/api/auth/password-reset', json={**body, 'email': 'stopped@example.invalid'}).status_code == 409
+        security._attempts.clear()
+        codes = [client.post('/api/auth/password-reset', json={**body, 'email': 'nobody@example.invalid'}).status_code for _ in range(11)]
+        assert codes[-1] == 429
+    finally:
+        client.close()
+        main.app.dependency_overrides.clear()
+        security._attempts.clear()
+    with database() as db:
+        assert db.get(User, locked_id).password_hash == LOCKED_PASSWORD
+        assert db.get(User, stopped_id).active is False
+        trail = audits(db, 'user.password_reset')
+        assert [(a.actor_id, a.target_id, a.details) for a in trail] == [(None, member_id, {'sessions_revoked': 1, 'via': 'login_page'})]

@@ -211,6 +211,8 @@ Compose 栈由自带的 `db`（PostgreSQL 16）、`api`、`attachments`（附件
 
 .env.example 不包含默认管理员账号或密码，init_env.py 只生成服务随机密钥且拒绝覆盖已有 .env。可选 BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD 必须显式一起设置，走相同初始化锁和标记；修改它们不会改变已有账号密码。SESSION_SECRET 至少 32 字符，保持稳定以保护会话及加密配置。真实 .env、数据库、运行日志和认证文件不得提交。
 
+忘记密码：管理员可在「成员管理」里为下级成员重置密码。设置 OPEN_PASSWORD_RESET=true 后，登录页会出现「忘记密码」，输入邮箱和新密码即可直接重置任何网页账号（含超级管理员），不做任何验证，并使该账号已登录的会话失效；默认关闭，只应在本机或可信内网开启。
+
 ## 无容器运行
 
 先创建专用 PostgreSQL 数据库并配置 DATABASE_URL；不要复用其他应用数据库。安装并配置 runner 所需 Codex CLI（固定版本见 runner/Dockerfile）。

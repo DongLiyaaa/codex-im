@@ -9,6 +9,7 @@ from sqlalchemy import select
 from . import approvals, policy, service
 from . import platform_auth as pa
 from .im_nicknames import clean
+from .security import hash_password
 from .models import Binding, Group, PlatformAuthJob, PlatformConnection, Resource, Run, SessionToken, User, uid
 
 ACTIVE_RUNS = ('queued', 'running', 'waiting_attachments')
@@ -103,6 +104,19 @@ def activate(db, actor, target):
     target.active = True
     service.audit(db, actor, 'user.activate', target.id)
     return True
+
+
+def reset_password(db, actor, target, password, via=None):
+    """An IM-only member has no web account; giving them a password would make their placeholder address loginable."""
+    if not target.login_enabled:
+        raise HTTPException(409, 'IM-only member has no web login')
+    target.password_hash = hash_password(password)
+    sessions = list(db.scalars(select(SessionToken).where(SessionToken.user_id == target.id)))
+    for session in sessions:
+        db.delete(session)
+    service.audit(db, actor, 'user.password_reset', target.id,
+                  {'sessions_revoked': len(sessions)} | ({'via': via} if via else {}))
+    db.flush()
 
 
 def apply(db, actor, target, body):

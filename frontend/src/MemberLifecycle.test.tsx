@@ -190,3 +190,22 @@ it('turning a policy off needs no organization and sends no stale scope', async 
   fireEvent.click(screen.getAllByText('保存')[1]);
   await waitFor(() => expect(request).toHaveBeenCalledWith('/im/onboarding-policy/dingtalk', { method: 'PUT', body: JSON.stringify({ enabled: false, org_id: 'org', team_id: 'dept', daily_cap: 5 }) }));
 });
+
+it('resets a web user password after both entries match, and never offers it for IM-only members', async () => {
+  serveUsers([person({ id: 'web', name: '网页成员', email: 'web@example.invalid', login_enabled: true }), person({})]);
+  renderUsers();
+  await screen.findByText('网页成员');
+  expect(within(screen.getByText('王小明').closest('tr')!).queryByText('重置密码')).toBeNull();
+  fireEvent.click(within(screen.getByText('网页成员').closest('tr')!).getByText('重置密码'));
+  const dialog = await screen.findByRole('dialog');
+  fireEvent.change(within(dialog).getByLabelText('新密码'), { target: { value: 'new-password-123' } });
+  fireEvent.change(within(dialog).getByLabelText('确认新密码'), { target: { value: 'new-password-999' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: '重置密码' }));
+  expect(await within(dialog).findByText('两次输入的密码不一致')).toBeTruthy();
+  expect(request.mock.calls.some(([path]) => String(path).endsWith('/password'))).toBe(false);
+  fireEvent.change(within(dialog).getByLabelText('确认新密码'), { target: { value: 'new-password-123' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: '重置密码' }));
+  await screen.findByText('密码已重置，对方需用新密码重新登录。');
+  const call = request.mock.calls.find(([path]) => path === '/users/web/password');
+  expect(call?.[1]).toMatchObject({ method: 'POST', body: JSON.stringify({ password: 'new-password-123' }) });
+});

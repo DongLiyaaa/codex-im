@@ -30,3 +30,18 @@ export function UserEditor({ target, actor, close, saved }: { target: User; acto
     </Form>
   </Modal>;
 }
+
+export function PasswordReset({ target, close, saved }: { target: User; close: () => void; saved: () => void }) {
+  const submit = (f: FormData) => {
+    const password = String(f.get('password') ?? '');
+    if (password !== String(f.get('confirmPassword') ?? '')) return Promise.reject(new Error('两次输入的密码不一致'));
+    return api(`/users/${encodeURIComponent(target.id)}/password`, { method: 'POST', body: JSON.stringify({ password }) });
+  };
+  return <Modal title={`重置「${target.name}」的密码`} close={close}>
+    <Form label="重置密码" submit={submit} onSuccess={saved}>
+      <Field label="新密码（至少 12 位）"><input aria-label="新密码" name="password" type="password" required minLength={12} maxLength={1024} autoComplete="new-password"/></Field>
+      <Field label="确认新密码"><input aria-label="确认新密码" name="confirmPassword" type="password" required minLength={12} maxLength={1024} autoComplete="new-password"/></Field>
+      <p className="notice">重置后对方已登录的网页会话立即失效，需要用新密码重新登录。</p>
+    </Form>
+  </Modal>;
+}
