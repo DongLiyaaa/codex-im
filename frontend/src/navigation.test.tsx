@@ -134,3 +134,13 @@ it('pending deletion prevents duplicate submission and closing', async () => {
 it.each(['#/unknown','#/users/abc','#/chat/%E0%A4%A','garbage'])('safely normalizes invalid route %s', hash=>{
   expect(readRoute(hash)).toEqual({page:'overview',conversationId:null});
 });
+
+it('shows the author links at the bottom of the workspace', async () => {
+  window.history.replaceState(null,'','#/chat'); render(<App/>);
+  const github = await screen.findByRole('link', { name: 'GitHub：DongLiyaaa' });
+  expect(github.closest('footer')).toBeTruthy();
+  expect(github.getAttribute('href')).toBe('https://github.com/DongLiyaaa');
+  expect(github.getAttribute('rel')).toBe('noopener noreferrer');
+  expect(screen.getByText('微信公众号：冬离鸭冬离')).toBeTruthy();
+  expect(screen.getByText('抖音号：冬离鸭冬离')).toBeTruthy();
+});

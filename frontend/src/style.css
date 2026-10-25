@@ -273,8 +273,15 @@ nav button.active { background: var(--fill-strong); font-weight: 500; }
 .header-right { gap: 12px; }
 .environment { font-size: var(--fs-caption); color: var(--text-2); padding: 3px 10px; background: var(--fill); border-radius: 999px; }
 .content { padding: 32px 32px 48px; flex: 1; max-width: 1280px; width: 100%; margin: 0 auto; }
-.workspace-footer { display: flex; justify-content: space-between; gap: 20px; padding: 14px 32px; color: var(--text-3); font-size: var(--fs-caption); border-top: 1px solid var(--line); }
-.workspace-footer > span:last-child { display: flex; align-items: center; gap: 6px; }
+.workspace-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 20px; padding: 14px 32px; color: var(--text-3); font-size: var(--fs-caption); border-top: 1px solid var(--line); }
+.workspace-footer > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.workspace-footer > span:last-child { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.social-links { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; column-gap: 24px; row-gap: 6px; color: var(--text-3); font-size: var(--fs-caption); }
+.social-links > * { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; color: inherit; text-decoration: none; }
+.social-links svg { flex-shrink: 0; opacity: .85; }
+.social-links a { border-radius: 6px; transition: color .15s ease; }
+.social-links a:hover { color: var(--text-2); }
+.social-links a:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
 
 /* ───────── Overview ───────── */
 .welcome {
@@ -531,7 +538,8 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .login-form .form-actions button { width: 100%; padding: 11px; min-height: 46px; font-size: var(--fs-headline); }
 .login-foot { padding-top: 18px; margin-top: 24px; display: flex; gap: 9px; align-items: center; font-size: var(--fs-footnote); color: var(--text-3); }
 .login-foot svg { flex-shrink: 0; }
-.login-security { position: absolute; bottom: 26px; display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: var(--fs-caption); }
+.login-bottom { position: absolute; bottom: 22px; left: 24px; right: 24px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.login-security { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: var(--fs-caption); }
 .boot { height: 100vh; display: flex; align-items: center; justify-content: center; flex-direction: column; color: var(--brand); }
 
 .mobile-toggle { display: none; }
@@ -569,6 +577,9 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
   .login-features { flex-direction: column; align-items: flex-start; gap: 12px; }
   .login-copy h1 { font-size: 34px; }
   .login-form { padding: 36px; }
+  .workspace-footer { grid-template-columns: 1fr; }
+  .workspace-footer > span { display: none; }
+  .workspace-footer > span:last-child { display: none; }
   .integration-config-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 720px) {
@@ -596,7 +607,6 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
   .actions .primary { margin-left: auto; }
   .resource-grid { grid-template-columns: 1fr; }
   .workspace-footer { padding: 12px 16px; }
-  .workspace-footer > span:last-child { display: none; }
   .chat-page { padding: 10px; }
   .chat-layout { display: flex; flex-direction: column; height: auto; min-height: calc(100dvh - 120px); }
   .conversation-panel { border-right: 0; border-bottom: 1px solid var(--line); max-height: none; flex-shrink: 0; }
@@ -621,7 +631,7 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
   .login-copy { padding: 28px 0 8px; }
   .login-copy h1 { font-size: 30px; margin: 12px 0; }
   .login-copy p, .login-features, .login-story > small { display: none; }
-  .login-form { padding: 36px 24px 70px; min-height: 470px; }
+  .login-form { padding: 36px 24px 116px; min-height: 470px; }
   .login-form-inner h2 { font-size: var(--fs-title2); }
   .form-grid { grid-template-columns: 1fr; gap: 0; }
   .notice { font-size: var(--fs-footnote); }

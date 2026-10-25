@@ -43,3 +43,13 @@ it('offers forgot password only when the server allows it, and resets after both
  expect(request).toHaveBeenCalledWith('/auth/password-reset',{email:'owner@example.invalid',password:'new-password-123'});
  expect(screen.getByRole('heading',{name:'登录你的工作空间'})).toBeTruthy();
 });
+it('shows the author links on the setup and login pages',async()=>{
+ request.mockImplementation(async(p:string)=>p==='/setup/status'?false:{ok:true});render(<App/>);
+ await screen.findByRole('heading',{name:'初始化管理员'});
+ expect(screen.getByRole('link',{name:'GitHub：DongLiyaaa'}).getAttribute('href')).toBe('https://github.com/DongLiyaaa');
+ cleanup();
+ request.mockImplementation(async(p:string)=>p==='/setup/status'?true:p==='/auth/me'?Promise.reject(new (await import('./api')).ApiError(401,'x')):p==='/auth/password-reset'?{enabled:false}:{ok:true});render(<App/>);
+ await screen.findByRole('heading',{name:'登录你的工作空间'});
+ expect(screen.getByRole('link',{name:'GitHub：DongLiyaaa'})).toBeTruthy();
+ expect(screen.getByText('微信公众号：冬离鸭冬离')).toBeTruthy();expect(screen.getByText('抖音号：冬离鸭冬离')).toBeTruthy();
+});
