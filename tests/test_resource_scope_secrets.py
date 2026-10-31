@@ -160,7 +160,36 @@ def test_listing_never_returns_header_values_to_anyone(session_secret):
     assert resource_secrets.PREFIX not in str(shown)
 
 
-def test_skill_text_is_visible_to_members_but_mcp_connection_details_are_not(session_secret):
-    skill = Resource(id='s', name='n', kind='skill', description='', org_id=None, enabled=True, config={'content': 'text'})
-    member = SimpleNamespace(role='member', org_id='org', active=True)
-    assert service.resource_out(skill, member)['config'] == {'content': 'text'}
+@pytest.mark.parametrize('role,org,active,resource_org,allowed', [
+    ('super_admin', None, True, None, True),
+    ('org_admin', 'org', True, 'org', True),
+    ('org_admin', 'other', True, 'org', False),
+    ('org_admin', 'org', True, None, False),
+    ('member', 'org', True, 'org', False),
+    ('team_lead', 'org', True, 'org', False),
+    ('super_admin', None, False, None, False),
+    ('org_admin', 'org', False, 'org', False),
+])
+def test_skill_source_requires_management_permission(role, org, active, resource_org, allowed):
+    text = 'PRIVATE-SKILL-SOURCE'
+    skill = Resource(id='s', name='n', kind='skill', description='Public description',
+                     org_id=resource_org, enabled=True, config={'content': text})
+    viewer = SimpleNamespace(role=role, org_id=org, active=active)
+    shown = service.resource_out(skill, viewer)
+    assert shown['config'] == ({'content': text} if allowed else {})
+    assert shown['can_manage'] is allowed
+    assert shown['description'] == 'Public description'
+    assert skill.config == {'content': text}
+
+
+def test_anonymous_reset_route_cannot_be_enabled(monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import main
+    monkeypatch.setenv('OPEN_PASSWORD_RESET', 'true')
+    assert not any(getattr(route, 'path', None) == '/api/auth/password-reset' for route in main.app.routes)
+    client = TestClient(main.app, raise_server_exceptions=True)
+    try:
+        assert client.get('/api/auth/password-reset').status_code == 404
+        assert client.post('/api/auth/password-reset', json={'email': 'owner@example.invalid', 'password': 'new-password-123'}).status_code in (404, 405)
+    finally:
+        client.close()

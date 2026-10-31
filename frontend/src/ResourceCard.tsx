@@ -42,7 +42,8 @@ export function ResourceCard({ resource, directory, onEdit, onDelete, busy, subj
         <dt>请求头</dt><dd>{headerNames.length ? `${headerNames.join('、')}（密钥已隐藏）` : '无'}</dd>
       </dl>
     </details>}
-    {!isMcp && typeof config.content === 'string' && config.content && <details className="resource-detail">
+    {!isMcp && !resource.can_manage && <p className="resource-grants">可调用此技能，原文仅管理员可查看。</p>}
+    {!isMcp && resource.can_manage && typeof config.content === 'string' && config.content && <details className="resource-detail">
       <summary>查看技能内容</summary>
       <pre className="skill-body">{skillBody(config.content)}</pre>
     </details>}

@@ -56,35 +56,32 @@ it('a skill is plain text: no mode choice, no YAML wording, and anything typed i
   expect(within(dialog()).queryByText('Skill 输入模式')).toBeNull();
   expect(document.body.textContent).not.toMatch(/YAML|SKILL\.md|分隔符/);
   type('名称', 'weekly-report');
-  type('这个技能是做什么的', '帮同事整理周报');
   // Text that merely looks like the dashes of a file header is still just text.
-  type('技能内容（必填）', '---\n先列出本周完成的事项\n---\n再写下周计划');
+  type('Markdown 正文（必填）', '---\n先列出本周完成的事项\n---\n再写下周计划');
   submit();
   await waitFor(() => expect(created()).toHaveLength(1));
   const body = sent();
-  expect(body).toMatchObject({ name: 'weekly-report', description: '帮同事整理周报', kind: 'skill', org_id: null, team_id: null, enabled: true });
+  expect(body).toMatchObject({ name: 'weekly-report', description: '', kind: 'skill', org_id: null, team_id: null, enabled: true });
   const content = (body.config as { content: string }).content;
-  expect(content.startsWith('---\nname: "weekly-report"\ndescription: "帮同事整理周报"\n---\n')).toBe(true);
+  expect(content).toBe('---\n先列出本周完成的事项\n---\n再写下周计划');
   expect(content.endsWith('---\n先列出本周完成的事项\n---\n再写下周计划')).toBe(true);
 });
 
-it('a skill with a Chinese name gets a stable technical id without asking the user for one', async () => {
+it('a skill accepts a Chinese name and sends the document without generating a header', async () => {
   await openForm();
   type('名称', '周报助手');
-  type('这个技能是做什么的', '整理周报');
-  type('技能内容（必填）', '先列出完成的事项');
+  type('Markdown 正文（必填）', '先列出完成的事项');
   submit();
   await waitFor(() => expect(created()).toHaveLength(1));
-  expect((sent().config as { content: string }).content).toMatch(/^---\nname: "skill-[0-9a-f]{16}"\n/);
+  expect((sent().config as { content: string }).content).toBe('先列出完成的事项');
 });
 
 it('says in plain words what is missing instead of mentioning YAML', async () => {
   await openForm();
   type('名称', '周报助手');
-  type('这个技能是做什么的', '   ');
-  type('技能内容（必填）', '正文');
+  type('Markdown 正文（必填）', '   ');
   submit();
-  expect(await screen.findByText('请用一两句话写明这个技能是做什么的，助手会据此判断什么时候使用它。')).toBeTruthy();
+  expect(await screen.findByText('请填写 Markdown 正文。')).toBeTruthy();
   expect(created()).toHaveLength(0);
 });
 
@@ -93,16 +90,16 @@ it('imports a text file into the box, can be edited afterwards, and refuses file
   const picker = within(dialog()).getByLabelText('选择要导入的文字文件') as HTMLInputElement;
   const choose = (file: File) => fireEvent.change(picker, { target: { files: [file] } });
   choose(new File(['\uFEFF第一步：打招呼\n第二步：整理周报'], '周报.md', { type: 'text/markdown' }));
-  await waitFor(() => expect((within(dialog()).getByLabelText('技能内容（必填）') as HTMLTextAreaElement).value).toBe('第一步：打招呼\n第二步：整理周报'));
+  await waitFor(() => expect((within(dialog()).getByLabelText('Markdown 正文（必填）') as HTMLTextAreaElement).value).toBe('第一步：打招呼\n第二步：整理周报'));
   expect(screen.getByText('已导入「周报.md」，可以继续修改。')).toBeTruthy();
   expect(screen.getByText('已输入 16 字')).toBeTruthy();
-  type('技能内容（必填）', '改过的内容');
+  type('Markdown 正文（必填）', '改过的内容');
   choose(new File(['x'.repeat(256 * 1024 + 1)], 'big.txt', { type: 'text/plain' }));
   expect(await screen.findByText('文件太大了（最多 256KB），请精简后再导入。')).toBeTruthy();
-  expect((within(dialog()).getByLabelText('技能内容（必填）') as HTMLTextAreaElement).value).toBe('改过的内容');
+  expect((within(dialog()).getByLabelText('Markdown 正文（必填）') as HTMLTextAreaElement).value).toBe('改过的内容');
   choose(new File(['abc\u0000def'], 'image.png', { type: 'image/png' }));
   expect(await screen.findByText('这个文件看起来不是文字文件，请选择 .txt 或 .md 文件。')).toBeTruthy();
-  expect((within(dialog()).getByLabelText('技能内容（必填）') as HTMLTextAreaElement).value).toBe('改过的内容');
+  expect((within(dialog()).getByLabelText('Markdown 正文（必填）') as HTMLTextAreaElement).value).toBe('改过的内容');
 });
 
 it('offers a department only once an organization is chosen, and sends both', async () => {
@@ -112,7 +109,7 @@ it('offers a department only once an organization is chosen, and sends both', as
   const department = within(dialog()).getByLabelText('部门') as HTMLSelectElement;
   expect(Array.from(department.options).map(option => option.textContent)).toEqual(['整个组织（不限部门）', '运营部']); // Only that organization's departments.
   fireEvent.change(department, { target: { value: 'dept' } });
-  type('名称', 'ops-skill'); type('这个技能是做什么的', '运营'); type('技能内容（必填）', '正文');
+  type('名称', 'ops-skill'); type('Markdown 正文（必填）', '正文');
   submit();
   await waitFor(() => expect(created()).toHaveLength(1));
   expect(sent()).toMatchObject({ org_id: 'org', team_id: 'dept' });
@@ -124,7 +121,7 @@ it('an organization-wide resource sends no department, and switching organizatio
   fireEvent.change(within(dialog()).getByLabelText('部门'), { target: { value: 'dept' } });
   fireEvent.change(within(dialog()).getByLabelText('组织'), { target: { value: 'org2' } });
   expect((within(dialog()).getByLabelText('部门') as HTMLSelectElement).value).toBe('');
-  type('名称', 'org-skill'); type('这个技能是做什么的', '说明'); type('技能内容（必填）', '正文');
+  type('名称', 'org-skill'); type('Markdown 正文（必填）', '正文');
   submit();
   await waitFor(() => expect(created()).toHaveLength(1));
   expect(sent()).toMatchObject({ org_id: 'org2', team_id: null });
@@ -136,7 +133,7 @@ it('going back to a global resource removes the department choice', async () => 
   fireEvent.change(within(dialog()).getByLabelText('部门'), { target: { value: 'dept' } });
   fireEvent.change(within(dialog()).getByLabelText('组织'), { target: { value: '' } });
   expect(within(dialog()).queryByLabelText('部门')).toBeNull();
-  type('名称', 'global-skill'); type('这个技能是做什么的', '说明'); type('技能内容（必填）', '正文');
+  type('名称', 'global-skill'); type('Markdown 正文（必填）', '正文');
   submit();
   await waitFor(() => expect(created()).toHaveLength(1));
   expect(sent()).toMatchObject({ org_id: null, team_id: null });
@@ -208,7 +205,7 @@ it('the add button stops at the limit', async () => {
   expect((within(dialog()).getByText('添加请求头') as HTMLButtonElement).closest('button')!.disabled).toBe(true);
 });
 
-const skill: Resource = { id: 's1', name: '周报助手', kind: 'skill', description: '整理周报', org_id: 'org', team_id: 'dept', enabled: true,
+const skill: Resource = { can_manage: true, id: 's1', name: '周报助手', kind: 'skill', description: '整理周报', org_id: 'org', team_id: 'dept', enabled: true,
   config: { content: '---\nname: "skill-abc"\ndescription: "整理周报"\n---\n第一步：列事项\n---\n第二步：写计划' } };
 const mcp: Resource = { id: 'm1', name: '库存查询', kind: 'mcp', description: '', org_id: null, team_id: null, enabled: false,
   config: { url: 'https://mcp.example.com/mcp', headers: { Authorization: '***', 'X-API-Key': '***' } } };

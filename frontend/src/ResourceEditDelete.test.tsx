@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { ResourceCard } from './ResourceCard';
 import { Management } from './Management';
 import type { Resource, User } from './api';
 
@@ -79,4 +80,32 @@ it('lists who a resource is granted to by name, and does not re-grant the scope 
   fireEvent.click(within(box).getByText('保存'));
   await waitFor(() => expect(request.mock.calls.some(call => call[1]?.method === 'PATCH')).toBe(true));
   expect(JSON.parse(request.mock.calls.find(item => item[1]?.method === 'PATCH')![1].body).grant_scope).toBe(false);
+});
+
+it.each([false, undefined])('hides skill source without management permission (%s)', can_manage => {
+  render(<ResourceCard resource={{ ...skill, can_manage }}/>);
+  expect(screen.queryByText('查看技能内容')).toBeNull();
+  expect(screen.queryByText('写周报')).toBeNull();
+  expect(screen.getByText('可调用此技能，原文仅管理员可查看。')).toBeTruthy();
+});
+
+it('allows resource administrators to preview skill source', () => {
+  render(<ResourceCard resource={skill}/>);
+  fireEvent.click(screen.getByText('查看技能内容'));
+  expect(screen.getByText('写周报')).toBeTruthy();
+});
+
+it('edits a complete document without dropping metadata or publishing its description', async () => {
+  const content = '---\nname: weekly\ndescription: PRIVATE\nlicense: MIT\n---\n# Body';
+  request.mockImplementation(async path => path === '/resources' ? [{ ...skill, config: { content } }] : path === '/directory' ? directory : []);
+  render(<Management page="resources" user={root} navigate={vi.fn()}/>);
+  fireEvent.click(await screen.findByText('编辑'));
+  const box = await screen.findByRole('dialog');
+  expect((within(box).getByLabelText('Markdown 正文（必填）') as HTMLTextAreaElement).value).toBe(content);
+  expect(box.querySelector('[name="description"]')).toBeNull();
+  fireEvent.click(within(box).getByText('保存'));
+  await waitFor(() => expect(request.mock.calls.some(call => call[1]?.method === 'PATCH')).toBe(true));
+  const body = JSON.parse(request.mock.calls.find(call => call[1]?.method === 'PATCH')![1].body);
+  expect(body.config.content).toBe(content);
+  expect(body.description).toBe(skill.description);
 });

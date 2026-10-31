@@ -106,7 +106,7 @@ def activate(db, actor, target):
     return True
 
 
-def reset_password(db, actor, target, password, via=None):
+def reset_password(db, actor, target, password):
     """An IM-only member has no web account; giving them a password would make their placeholder address loginable."""
     if not target.login_enabled:
         raise HTTPException(409, 'IM-only member has no web login')
@@ -114,8 +114,7 @@ def reset_password(db, actor, target, password, via=None):
     sessions = list(db.scalars(select(SessionToken).where(SessionToken.user_id == target.id)))
     for session in sessions:
         db.delete(session)
-    service.audit(db, actor, 'user.password_reset', target.id,
-                  {'sessions_revoked': len(sessions)} | ({'via': via} if via else {}))
+    service.audit(db, actor, 'user.password_reset', target.id, {'sessions_revoked': len(sessions)})
     db.flush()
 
 

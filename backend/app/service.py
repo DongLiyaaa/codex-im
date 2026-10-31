@@ -1,4 +1,5 @@
 import json
+import hashlib
 import asyncio
 import importlib
 import inspect
@@ -38,6 +39,46 @@ def validate_mcp_url(url):
         raise HTTPException(422, 'MCP URL must resolve exclusively to public HTTPS addresses')
 
 
+def normalize_skill_config(name, config):
+    if set(config) != {'content'} or not isinstance(config.get('content'), str):
+        raise HTTPException(422, 'Skill 配置只能包含字符串字段 content。')
+    content = config['content'].lstrip('\ufeff')
+    if len(content) > 64000 or not content.strip():
+        raise HTTPException(422, '请填写 Markdown 正文，完整内容不能超过 64000 个字符。')
+    match = re.match(r'\A---\r?\n(.*?)\r?\n---(?:\r?\n|$)', content, re.S)
+    front, body = {}, content
+    if content.startswith(('---\n', '---\r\n')):
+        if not match:
+            raise HTTPException(422, 'Markdown 头部缺少结束分隔符 ---。')
+        try:
+            front = yaml.safe_load(match.group(1))
+        except yaml.YAMLError:
+            raise HTTPException(422, 'Markdown 头部 YAML 格式无效。') from None
+        if front is None:
+            front = {}
+        if not isinstance(front, dict) or any(not isinstance(k, str) for k in front):
+            raise HTTPException(422, 'Markdown 头部必须是字段映射。')
+        body = content[match.end():]
+    if not body.strip():
+        raise HTTPException(422, '请填写 Markdown 正文，不能只有头部。')
+    valid_name = isinstance(front.get('name'), str) and re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', front['name']) and len(front['name']) <= 64
+    valid_description = isinstance(front.get('description'), str) and bool(front['description'].strip())
+    if match and valid_name and valid_description:
+        return {'content': content}
+    if not valid_name:
+        slug = name.strip()
+        if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', slug) or len(slug) > 64:
+            prefix = re.sub(r'[^a-z0-9]+', '-', slug.lower()).strip('-')[:40].rstrip('-') or 'skill'
+            slug = prefix + '-' + hashlib.sha256(name.strip().encode()).hexdigest()[:16]
+        front['name'] = slug
+    if not valid_description:
+        front['description'] = '执行技能：' + name.strip()
+    normalized = '---\n' + yaml.safe_dump(front, allow_unicode=True, sort_keys=False) + '---\n' + body
+    if len(normalized) > 64000:
+        raise HTTPException(422, 'Skill 完整内容（含自动补齐的头部）不能超过 64000 个字符。')
+    return {'content': normalized}
+
+
 def validate_resource(kind, config):
     if kind == 'skill':
         if set(config) != {'content'} or not isinstance(config.get('content'), str):
@@ -73,8 +114,6 @@ def resource_out(resource, actor):
         config = dict(resource.config)
         if resource.kind == 'mcp':
             config['headers'] = {key: '***' for key in config.get('headers', {})}
-    elif resource.kind == 'skill':
-        config = {'content': resource.config.get('content', '')}
     return {key: getattr(resource, key) for key in ('id', 'name', 'kind', 'description', 'org_id', 'team_id', 'enabled')} | {
         'config': config, 'can_manage': policy.can_manage_resource(actor, resource)}
 

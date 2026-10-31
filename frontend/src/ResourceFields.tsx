@@ -15,8 +15,8 @@ const readText = (file: File) => new Promise<string>((resolve, reject) => {
   reader.readAsText(file, 'utf-8');
 });
 
-function SkillFields() {
-  const [text, setText] = useState('');
+export function SkillFields({ initialContent = '' }: { initialContent?: string }) {
+  const [text, setText] = useState(initialContent);
   const [note, setNote] = useState(''); const [problem, setProblem] = useState('');
   const picker = useRef<HTMLInputElement>(null);
   async function importFile(event: ChangeEvent<HTMLInputElement>) {
@@ -32,17 +32,14 @@ function SkillFields() {
     } catch (error) { setProblem(error instanceof Error ? error.message : '读取文件失败，请重试。'); }
   }
   return <>
-    <Field label="这个技能是做什么的？（必填）" hint="用一两句话说明用途。助手会据此判断什么时候使用它。">
-      <textarea aria-label="这个技能是做什么的" name="description" required maxLength={5000} rows={2} placeholder="例如：帮同事把每周的工作内容整理成周报。"/>
-    </Field>
     <div className="field">
       <div className="skill-text-head">
-        <label htmlFor="skill-text">技能内容（必填）</label>
+        <label htmlFor="skill-text">Markdown 正文（必填）</label>
         <button type="button" className="text-button" onClick={() => picker.current?.click()}><Upload size={15}/>从文件导入</button>
         <input ref={picker} type="file" hidden accept=".txt,.md,.markdown,text/plain,text/markdown" onChange={event => void importFile(event)} aria-label="选择要导入的文字文件"/>
       </div>
       <textarea id="skill-text" name="content" required rows={10} className="skill-text-area" value={text} onChange={event => setText(event.target.value)} placeholder={EXAMPLE}/>
-      <small>直接用文字写就行，不需要任何格式或符号。可以写：什么时候用、要做哪几步、要注意什么。</small>
+      <small>直接粘贴完整 Markdown 文档，支持带 name / description 的头部；缺失的必要字段由系统补齐，无需单独填写说明。</small>
       <div className="skill-text-meta" aria-live="polite">
         <span className={problem ? 'skill-text-error' : 'skill-text-note'}>{problem || note}</span>
         <span>已输入 {Array.from(text).length} 字</span>

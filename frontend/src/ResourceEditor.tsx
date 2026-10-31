@@ -3,8 +3,9 @@ import { api } from './api';
 import type { Resource, User } from './api';
 import { Field, Form, Modal, nullable, value } from './ui';
 import { ScopeFields } from './ScopeFields';
-import { resourceScope, scopeHints, skillBody } from './ResourceCard';
+import { resourceScope, scopeHints } from './ResourceCard';
 import type { DirectoryNames } from './ResourceCard';
+import { SkillFields } from './ResourceFields';
 import { prepareSkillContent } from './skillContent';
 import { buildMcpConfig, HEADER_LIMIT } from './mcpHeaders';
 import type { HeaderRow } from './mcpHeaders';
@@ -27,17 +28,17 @@ export function ResourceEditor({ resource, user, close, saved, directory }: { re
       extra.forEach(key => rows.push({ name: String(f.get(`new_name_${key}`) ?? ''), value: String(f.get(`new_value_${key}`) ?? '') }));
       body = buildMcpConfig(String(f.get('url') ?? ''), rows.some(row => row.name.trim() || row.value.trim()) ? 'headers' : 'none', rows);
     } else {
-      body = { content: await prepareSkillContent(value(f, 'name'), String(f.get('description') ?? ''), String(f.get('content') ?? ''), 'body') };
+      body = { content: prepareSkillContent(String(f.get('content') ?? '')) };
     }
     return api(`/resources/${encodeURIComponent(resource.id)}`, {
       method: 'PATCH',
-      body: JSON.stringify({ name: value(f, 'name'), description: String(f.get('description') ?? '').trim(), org_id: nullable(f, 'org_id'), team_id: nullable(f, 'team_id'), enabled: f.has('enabled'), config: body, grant_scope: !!scope.org && f.has('grant_scope') }),
+      body: JSON.stringify({ name: value(f, 'name'), description: isMcp ? String(f.get('description') ?? '').trim() : resource.description, org_id: nullable(f, 'org_id'), team_id: nullable(f, 'team_id'), enabled: f.has('enabled'), config: body, grant_scope: !!scope.org && f.has('grant_scope') }),
     });
   }
 
   return <Modal title={`编辑${isMcp ? ' MCP 服务' : ' Skill 技能'}`} close={close}>
     <Form label="保存" submit={submit} onSuccess={saved}>
-      <Field label="名称"><input name="name" required maxLength={120} defaultValue={resource.name}/></Field>
+      <Field label="名称" hint={isMcp ? undefined : '支持中英文双语，例如：广告诊断 / Ads Diagnosis'}><input aria-label="名称" name="name" required maxLength={120} defaultValue={resource.name}/></Field>
       <ScopeFields scope={scope} change={setScope} optionalOrg departmentWithOrg fixedOrg={user.role !== 'super_admin'}
         orgHint={scopeHints.org} teamHint={`${scopeHints.team}缩小范围后，范围之外已有的授权会被自动撤销。`}
         teamEmptyLabel="整个组织（不限部门）"/>
@@ -59,10 +60,7 @@ export function ResourceEditor({ resource, user, close, saved, directory }: { re
           </div>)}
           <button type="button" className="secondary" disabled={kept.length + extra.length >= HEADER_LIMIT} onClick={() => { setExtra(current => [...current, next]); setNext(n => n + 1); }}>添加请求头</button>
         </fieldset>
-      </> : <>
-        <Field label="这个技能是做什么的？（必填）"><textarea name="description" required maxLength={5000} rows={2} defaultValue={resource.description}/></Field>
-        <Field label="技能内容（必填）"><textarea name="content" required rows={10} className="skill-text-area" defaultValue={skillBody(String(config.content ?? ''))}/></Field>
-      </>}
+      </> : <SkillFields initialContent={String(config.content ?? '')}/>}
       <label className="checkbox"><input type="checkbox" name="enabled" defaultChecked={resource.enabled}/>启用</label>
     </Form>
   </Modal>;

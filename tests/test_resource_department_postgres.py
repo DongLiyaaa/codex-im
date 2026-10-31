@@ -315,3 +315,85 @@ def test_who_may_change_a_members_role_or_department(database):
         with pytest.raises(HTTPException) as sole:
             main.update_user(member.id, schemas.UserUpdate(role='member', org_id=org, team_id=ops), root, db)
         assert sole.value.status_code == 409
+
+
+@pytest.mark.parametrize('group_chat', [False, True])
+def test_skill_source_hidden_over_http_but_available_to_authorized_execution(database, group_chat):
+    from test_setup import http
+    from app import security
+    from app.models import Message
+    text = '---\nname: "private"\ndescription: "test"\n---\nPRIVATE-SOURCE-MARKER'
+    password = secrets.token_urlsafe(20)
+    with database.begin() as db:
+        root, org, ops, _ = company(db)
+        member = person(db, 'reader', 'member', org, ops)
+        root.password_hash = member.password_hash = security.hash_password(password)
+        skill = create(db, root, org_id=org, config={'content': text})
+        hidden = create(db, root, org_id=org, name='ungranted')
+        grant(db, 'user', member, skill)
+        group = Group(name='private', org_id=org, team_id=ops, member_ids=[member.id])
+        db.add(group); db.flush()
+        if group_chat:
+            grant(db, 'group', group, skill)
+        conversation = Conversation(owner_id=member.id, group_id=group.id if group_chat else None, title='private')
+        db.add(conversation); db.flush()
+        message = Message(conversation_id=conversation.id, role='user', content='perform task')
+        db.add(message); db.flush()
+        run = Run(conversation_id=conversation.id, user_id=member.id, message_id=message.id)
+        db.add(run); db.flush()
+        ids = skill.id, hidden.id, conversation.id, run.id
+        emails = member.email, root.email
+    client = http(database)
+    try:
+        assert client.post('/api/auth/login', json={'email': emails[0], 'password': password}).status_code == 200
+        for path in ('/api/resources', f'/api/conversations/{ids[2]}/capabilities'):
+            response = client.get(path)
+            assert response.status_code == 200
+            assert 'PRIVATE-SOURCE-MARKER' not in response.text
+            rows = response.json() if path == '/api/resources' else response.json()['skills']
+            assert [row['id'] for row in rows] == [ids[0]]
+            assert rows[0]['config'] == {} and rows[0]['can_manage'] is False
+        assert client.post('/api/auth/login', json={'email': emails[1], 'password': password}).status_code == 200
+        rows = {row['id']: row for row in client.get('/api/resources').json()}
+        assert rows[ids[0]]['config']['content'] == text
+        with database() as db:
+            payload = service.build_payload(db, db.get(Run, ids[3]))
+            assert payload['skills'] == [{'name': ids[0], 'content': text}]
+        with database.begin() as db:
+            binding = db.scalar(select(Binding).where(Binding.resource_id == ids[0], Binding.subject_type == ('group' if group_chat else 'user')))
+            db.delete(binding)
+        with database() as db:
+            assert service.build_payload(db, db.get(Run, ids[3]))['skills'] == []
+    finally:
+        client.close()
+        main.app.dependency_overrides.clear()
+
+
+def test_markdown_create_edit_http_keeps_private_metadata(database):
+    from test_setup import http
+    from app import security
+    password = secrets.token_urlsafe(20)
+    with database.begin() as db:
+        root, _, _, _ = company(db)
+        root.password_hash = security.hash_password(password)
+        email = root.email
+    client = http(database)
+    try:
+        assert client.post('/api/auth/login', json={'email': email, 'password': password}).status_code == 200
+        body = {'name': '广告诊断 / Ads Diagnosis', 'kind': 'skill', 'config': {'content': '# 正文'}}
+        response = client.post('/api/resources', json=body)
+        assert response.status_code == 201
+        saved = response.json()
+        assert saved['description'] == ''
+        service.validate_resource('skill', saved['config'])
+        document = '---\nname: ads-diagnosis\ndescription: PRIVATE\nmetadata:\n  owner: private\n---\n# Body\n'
+        update = {key: saved[key] for key in ('name', 'description', 'org_id', 'team_id', 'enabled')}
+        update['config'] = {'content': document}
+        response = client.patch('/api/resources/' + saved['id'], json=update)
+        assert response.status_code == 200
+        assert response.json()['config']['content'] == document
+        assert response.json()['description'] == ''
+        assert client.patch('/api/resources/' + saved['id'], json=update).json()['config']['content'] == document
+    finally:
+        client.close()
+        main.app.dependency_overrides.clear()

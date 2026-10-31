@@ -75,7 +75,7 @@ async def guard_origin(request: Request, call_next):
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request, exc):
-    if request.url.path.startswith('/api/setup') or request.url.path in ('/api/auth/login', '/api/auth/password-reset'):
+    if request.url.path.startswith('/api/setup') or request.url.path == '/api/auth/login':
         return JSONResponse({'detail': 'Invalid authentication request'}, status_code=422)
     if request.url.path.startswith(('/api/integrations/config/', '/api/integrations/oauth/')):
         return JSONResponse({'detail': 'Invalid IM configuration request'}, status_code=422)
@@ -150,31 +150,6 @@ def logout(request: Request, response: Response, db=Depends(get_db, scope='funct
     if session:
         db.delete(session)
     response.delete_cookie('hub_session', path='/', httponly=True, samesite='strict')
-    return {'ok': True}
-
-
-def open_password_reset():
-    # Anyone who can reach the login page can then reset any web account, so it is off unless the operator turns it on.
-    return os.getenv('OPEN_PASSWORD_RESET', '').strip().lower() in ('1', 'true', 'yes', 'on')
-
-
-@app.get('/api/auth/password-reset')
-def password_reset_status():
-    return {'enabled': open_password_reset()}
-
-
-@app.post('/api/auth/password-reset')
-def reset_forgotten_password(body: schemas.OpenPasswordReset, request: Request, db=Depends(get_db, scope='function')):
-    from . import user_lifecycle
-    if not open_password_reset():
-        raise HTTPException(404, 'Not found')
-    rate_limit('password-reset:' + (request.client.host if request.client else 'unknown'))
-    target = db.scalar(select(User).where(User.email == body.email).with_for_update())
-    if target is None or not target.login_enabled:
-        raise HTTPException(404, 'Account not found')
-    if not target.active:
-        raise HTTPException(409, 'Account deactivated')
-    user_lifecycle.reset_password(db, None, target, body.password, via='login_page')
     return {'ok': True}
 
 
@@ -359,9 +334,10 @@ def create_resource(body: schemas.ResourceCreate, actor=Depends(current_user), d
     resource = Resource(**{key: value for key, value in values.items() if key not in ('team_id', 'config', 'grant_scope')})
     resource.team_id = body.team_id
     policy.require(policy.can_manage_resource(actor, resource))
-    service.validate_resource(body.kind, body.config)
+    config = service.normalize_skill_config(body.name, body.config) if body.kind == 'skill' else body.config
+    service.validate_resource(body.kind, config)
     # Validated as typed, stored encrypted: a header secret is never kept in readable form.
-    resource.config = resource_secrets.seal_config(body.kind, body.config)
+    resource.config = resource_secrets.seal_config(body.kind, config)
     db.add(resource)
     db.flush()
     service.audit(db, actor, 'resource.create', resource.id)
@@ -383,12 +359,13 @@ def update_resource(identifier: str, body: schemas.ResourceUpdate, actor=Depends
     # A header still showing the mask is unchanged; validate it as an ordinary value.
     plain = {**body.config, 'headers': {k: ('x' if v == resource_secrets.MASK else v) for k, v in body.config['headers'].items()}} \
         if resource.kind == 'mcp' and isinstance(body.config.get('headers'), dict) else body.config
-    service.validate_resource(resource.kind, plain)
+    config = service.normalize_skill_config(body.name, body.config) if resource.kind == 'skill' else body.config
+    service.validate_resource(resource.kind, config if resource.kind == 'skill' else plain)
     previous = {'org_id': resource.org_id, 'team_id': resource.team_id}
     resource.name, resource.description, resource.org_id, resource.enabled = body.name, body.description, body.org_id, body.enabled
     resource.team_id = body.team_id
     policy.require(policy.can_manage_resource(actor, resource))
-    resource.config = resource_secrets.merge_config(resource.kind, body.config, resource.config)
+    resource.config = resource_secrets.merge_config(resource.kind, config, resource.config)
     revoked = []
     if previous != {'org_id': resource.org_id, 'team_id': resource.team_id}:
         # A grant must stay inside the resource's scope; narrowing the scope revokes the grants that fall outside it.
