@@ -8,6 +8,7 @@ import { Avatar } from './Avatar';
 import { avatarFromFile, AVATAR_TYPES } from './avatarImage';
 import { Feedback, Field } from './ui';
 import './Settings.css';
+import { CodexAuthorization } from './CodexAuthorization';
 
 export function Settings({ user, onSaved }: { user: User; onSaved: (user: User) => void }) {
   const [name, setName] = useState(user.name);
@@ -52,5 +53,6 @@ export function Settings({ user, onSaved }: { user: User; onSaved: (user: User) 
       <Feedback error={error}/>
       <div className="form-actions"><button className="primary" type="submit" disabled={busy || !trimmed || (!nameChanged && !avatarChanged)}>{busy && <LoaderCircle size={16} className="spin"/>}{busy ? '正在保存…' : '保存'}</button></div>
     </form>
+    <CodexAuthorization key={String(user.id)}/>
   </>;
 }

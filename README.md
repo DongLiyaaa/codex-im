@@ -215,9 +215,19 @@ Compose 栈由自带的 `db`（PostgreSQL 16）、`api`、`attachments`（附件
 
 Skill 原文保护：获授权员工可调用 Skill，但资源列表和会话能力接口不返回正文；仅有资源管理权限的管理员可查看、编辑原文。名称和说明仍会展示，请勿在说明中填写保密规则。执行时模型仍接收原文，因此这不是模型输出防泄露保证，也无法追回历史已泄露内容。
 
+## 本人 ChatGPT 授权
+
+本地或开源自部署可在「个人设置」或 Codex 会话中点击「登录 ChatGPT 授权」。没有系统 API Key、没有自定义第三方端点，且 CODEX_AUTH_MODE=api 时提供个人设备授权；用户自行打开官方页面输入一次性代码。可能需要先在 ChatGPT 安全设置中开启设备登录，有账号不保证拥有 Codex 额度。系统 API Key 优先，失败时不会自动切换为其他账号；显式配置的共享 ChatGPT 模式会标明为共享，不导入为个人授权。
+
+飞书、钉钉已绑定的活跃用户可私聊发送 `/codex-login`、`/codex-status`、`/codex-logout`。群聊仅提示转私聊；钉钉旧 webhook 无法安全私发设备码时拒绝发起。链接与代码不进入普通会话记录。授权完成后请重新发送任务，不会自动重放失败任务。
+
+个人凭据以 SESSION_SECRET 独立派生密钥加密保存在 PostgreSQL，按用户隔离；同一用户的凭据使用租约串行刷新，其他用户不能读取、覆盖或断开。运行时临时 CODEX_HOME 不挂载宿主账号；令牌不发往第三方模型端点、不交给模型。断开、停用用户会使旧任务的领取/回存失效；断开 Hub 不等于注销其他 OpenAI 设备。授权中 runner 重启需要重新发起，已持久化的连接不依赖临时目录。
+
+API 与 runner 需配套升级；新增 codex_connections、codex_login_jobs 表。容器内 CODEX_CREDENTIAL_BRIDGE_URL 指向 API 内部地址，本地运行需设为本地 API 地址。API/runner 之间应使用受信网络，跨主机部署需加 TLS；SESSION_SECRET 必须稳定保管。个人授权基于官方 Codex app-server 的设备授权能力，不以版本号决定是否支持，能力缺失时明确报错。本功能不代表商业托管接入许可，商业托管应另行使用官方 Sign in with ChatGPT 方案。
+
 ## 无容器运行
 
-先创建专用 PostgreSQL 数据库并配置 DATABASE_URL；不要复用其他应用数据库。安装并配置 runner 所需 Codex CLI（固定版本见 runner/Dockerfile）。
+先创建专用 PostgreSQL 数据库并配置 DATABASE_URL；不要复用其他应用数据库。安装并配置 runner 所需 Codex CLI。Codex CLI 和 Claude Code 不按版本号限制运行；状态页的版本仅供参考，无法读取版本也不会单独导致不可用。镜像构建默认使用 latest，可用 CODEX_CLI_VERSION / CLAUDE_CLI_VERSION 指定安装版本。构建缓存可能复用已有 CLI 层；需要更新 latest 时使用 --no-cache 重建 runner。现有容器不会自动更新；新版仍需支持现有命令参数、输出协议和安全沙箱，不能保证所有未来版本无条件兼容。
 
 ```bash
 uv venv --python 3.12 .venv
@@ -321,7 +331,7 @@ URL hash 记录当前页面与会话，例如 `#/chat/<conversation-id>`、`#/re
 |ChatGPT OAuth|`CODEX_AUTH_MODE=chatgpt`，`CODEX_OAUTH_AUTH_FILE`为显式绝对路径|复用项目独立登录，自动写回CLI刷新后的凭据|同一凭据源只允许一个执行；冲突返回429 `OAUTH_BUSY`|
 |API key|`CODEX_AUTH_MODE=api`，`CODEX_API_KEY`或`OPENAI_API_KEY`|保留最多两个并行执行|需要独立API凭据及对应额度|
 
-runner本身及Docker默认`api`，本地launcher默认`chatgpt`；在环境变量或项目`.env`显式设置模式可覆盖。OAuth模式不会向子进程传入API key。固定版本源码已核对`forced_login_method="chatgpt"`与`cli_auth_credentials_store="file"`，真实运行使用`--strict-config`。
+runner本身及Docker默认`api`，本地launcher默认`chatgpt`；在环境变量或项目`.env`显式设置模式可覆盖。OAuth模式不会向子进程传入API key。先前验证版本的源码已核对`forced_login_method="chatgpt"`与`cli_auth_credentials_store="file"`，真实运行使用`--strict-config`。
 
 每次任务仍有独立HOME、CODEX_HOME、workspace与tmp；只复制指定auth.json，绝不加载宿主HOME/keyring。源文件必须为当前运行用户所有的普通文件、0600、非符号链接且只有一个硬链接，父目录建议0700且必须可写。稳定的同目录`auth.json.lock`以非阻塞`flock`锁住整个OAuth执行。子进程退出（包括失败、超时、取消）后校验凭据，使用0600临时文件、fsync和原子replace写回刷新结果；源文件被外部改动时拒绝覆盖。输出会对刷新前后令牌与MCP头部值脱敏。
 

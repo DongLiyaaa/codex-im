@@ -25,7 +25,6 @@ STATUS_ERRORS = {401: 'RUNNER_AUTH_FAILED', 404: 'RUNNER_OUTDATED', 503: 'RUNNER
 class Codex(BaseModel):
     installed: bool
     version: str | None = Field(None, max_length=40)
-    pinned_version: str = Field(max_length=40)
 
 
 class Model(BaseModel):
@@ -57,7 +56,6 @@ class ClaudeStatus(BaseModel):
     ready: bool
     installed: bool = False
     version: str | None = Field(None, max_length=40)
-    pinned_version: str | None = Field(None, max_length=40)
     model: Model | None = None
     config_error: str | None = Field(None, max_length=60)
     model_endpoint: Endpoint | None = None
@@ -69,6 +67,7 @@ class Agents(BaseModel):
 
 
 class RunnerStatus(BaseModel):
+    personal_auth_available: bool = False
     ready: bool
     checked_at: int
     auth_mode: Literal['api', 'chatgpt', 'invalid']

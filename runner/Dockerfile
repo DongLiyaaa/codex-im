@@ -5,8 +5,10 @@ FROM --platform=${RUNNER_PLATFORM} node:22.16.0-bookworm-slim AS node
 FROM --platform=${RUNNER_PLATFORM} python:3.12.10-slim-bookworm
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+ARG CODEX_CLI_VERSION=latest
+ARG CLAUDE_CLI_VERSION=latest
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && npm install --global --registry=https://registry.npmjs.org @openai/codex@0.157.1 @anthropic-ai/claude-code@2.1.286 \
+    && npm install --global --registry=https://registry.npmjs.org "@openai/codex@${CODEX_CLI_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}" \
     && npm cache clean --force \
     && codex --version \
     && claude --version \
@@ -14,7 +16,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 WORKDIR /app
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-COPY main.py sandbox_probe.py ./
+COPY main.py sandbox_probe.py codex_auth.py ./
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 USER 10001:10001
 ARG VERSION=0.0.4

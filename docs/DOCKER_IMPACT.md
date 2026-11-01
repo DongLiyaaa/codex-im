@@ -16,7 +16,7 @@
 |资源|db 768 MiB/1 CPU，api 768 MiB/1 CPU，attachments 512 MiB/1 CPU，runner 1.5 GiB/2 CPU（pids 192）；可选 IM 各 384 MiB/0.5 CPU/64 PID|上限合计约 3.5 GiB（含 IM 约 4.25 GiB）。仍共享 Docker Desktop 宿主资源，不能声称零性能影响；amd64 构建期 CPU 会冲高，另计|
 |IM 常驻进程|可选 `im` profile，默认不启动|飞书同一应用只允许一个长连接；本机已有直接运行的 IM 进程时不要同时启动，否则消息会被两边各分走一部分。启动前先停掉其中一边|
 |IM 数据库|共享本栈专属 PG，使用 im_connections 心跳表|每进程 5 秒一次状态写入；需要 API 先完成业务表迁移，由 api 健康检查保证启动顺序|
-|Claude CLI（可选）|runner 镜像额外安装固定版本的 Claude CLI（2.1.286），多占一部分镜像体积；`HUB_AGENTS` 默认只有 codex|不新增容器、端口、网络或卷。启用 claude 后 runner 另外访问 `CLAUDE_BASE_URL`（留空为 Anthropic 官方端点），与 Codex 的出站规则一致，仍无 Docker socket 与宿主 HOME 挂载|
+|Claude CLI（可选）|runner 镜像额外安装 Claude CLI（构建参数 CLAUDE_CLI_VERSION，默认 latest），多占一部分镜像体积；`HUB_AGENTS` 默认只有 codex|不新增容器、端口、网络或卷。启用 claude 后 runner 另外访问 `CLAUDE_BASE_URL`（留空为 Anthropic 官方端点），与 Codex 的出站规则一致，仍无 Docker socket 与宿主 HOME 挂载|
 |外部服务|runner 访问模型服务和已授权 HTTPS MCP；api、attachments 访问 IM 平台|需要独立凭据；默认无凭据，不会自动发送 IM 消息|
 |安全|非 root（uid 10001）、只读根文件系统、`cap_drop: ALL`、`no-new-privileges`、tmpfs 限额|Codex Linux 沙箱兼容性需要实际验证；不得为解决兼容性静默启用 privileged|
 
@@ -105,3 +105,5 @@ docker compose --env-file .env.docker up -d --build db api attachments runner
 - 运行器对接（2026-10-05）：在隔离的临时 Compose 项目里用 arm64 覆盖启动运行器，`/health` 为 ready 且容器 healthy，经 HTTP `POST /execute` 用 `gpt-6.1-sol` 得到正常答复；临时项目已整体拆除。运行器 `/health` 现在包含沙箱预检，默认 amd64 运行器如实显示 `SANDBOX_UNAVAILABLE`。
 - 启用 arm64 覆盖后（2026-10-05，真实栈）：运行器容器 healthy，镜像为 arm64，加固参数（`cap_drop: ALL`、只读根文件系统、`no-new-privileges`、非特权）与内联的 seccomp 配置都在；主页检查接口显示沙箱 `ok`、模型端点连通；经 api → runner 发一次最小任务，HTTP 200，约 6 秒得到答复。重建只涉及运行器一个容器，`api`、`attachments`、`db` 与其他容器没有重启。
 - 验证时发现并修复了登录后立即请求会被拒绝的竞态：FastAPI 新版在响应发出之后才执行 `get_db` 的提交。所有数据库依赖现统一为 `Depends(get_db, scope='function')`，并有回归测试防止退回。
+
+个人 Codex 授权新增 PostgreSQL 表 codex_connections / codex_login_jobs，不新增容器、端口或宿主目录挂载。API 与 runner 必须一起升级；runner 通过 CODEX_CREDENTIAL_BRIDGE_URL 访问受 RUNNER_TOKEN 保护的内部凭据接口。授权进程最多3个、执行任务最多2个，总上限5；无全局API Key时，健康检查仅判断个人授权基础设施，不表示任何用户已经登录。未完成的设备授权在 runner 重启后需重新发起。

@@ -1,4 +1,4 @@
-"""Isolated agent runner (Codex 0.157.1, optionally Claude CLI); run with uvicorn main:app --host 0.0.0.0 --port 8081.
+"""Isolated agent runner (Codex CLI, optionally Claude CLI); run with uvicorn main:app --host 0.0.0.0 --port 8081.
 
 HTTP MCP runs in the agent parent, outside command sandbox network restrictions.
 Deployment must enforce network egress policy against DNS rebinding/redirect SSRF.
@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import importlib.util
 import fcntl
 import stat
 import hmac
@@ -29,8 +30,12 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-VERSION = "0.157.1"
-CLAUDE_VERSION = "2.1.286"
+_auth_spec = importlib.util.spec_from_file_location("hub_codex_auth", Path(__file__).with_name("codex_auth.py"))
+codex_auth = importlib.util.module_from_spec(_auth_spec)
+_auth_spec.loader.exec_module(codex_auth)
+login_manager = codex_auth.Manager()
+
+
 AGENTS = ("codex", "claude")
 MAX_BODY = 512_000
 MAX_OUTPUT = 1_048_576
@@ -99,6 +104,7 @@ class Execute(StrictModel):
     attachment_capability: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]+\.[a-f0-9]{64}$', max_length=2048)
     image_capability: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]+\.[a-f0-9]{64}$', max_length=2048)
     images: list[AttachmentImage] = Field(default_factory=list, max_length=5)
+    codex_ticket: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{43}$")
     platform_capability: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]+\.[a-f0-9]{64}$', max_length=2048)
 
     @field_validator("skills", "mcps")
@@ -212,6 +218,82 @@ def configured() -> tuple[str | None, str | None]:
     if not key or not key.strip():
         return None, "MODEL_API_KEY_NOT_CONFIGURED"
     return key, None
+
+
+def personal_available():
+    return (os.getenv('CODEX_AUTH_MODE', 'api') == 'api'
+            and not (os.getenv('CODEX_API_KEY') or os.getenv('OPENAI_API_KEY') or '').strip()
+            and not os.getenv('CODEX_BASE_URL', '').strip()
+            and len(os.getenv('RUNNER_TOKEN', '').encode()) >= 32)
+
+
+def authentication_mode():
+    if 'codex' not in enabled_agents() or not shutil.which('codex'):
+        return {'mode': 'unavailable', 'error': 'CODEX_CLI_UNAVAILABLE'}
+    if personal_available():
+        return {'mode': 'personal', 'error': None}
+    key, error = configured()
+    return {'mode': 'unavailable' if error else 'api' if key else 'shared', 'error': error}
+
+
+async def credential_bridge(payload, operation, auth=None):
+    import httpx
+    base = os.getenv('CODEX_CREDENTIAL_BRIDGE_URL', 'http://api:18200').rstrip('/')
+    parsed = urlsplit(base)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise RunnerError('CODEX_CREDENTIAL_BRIDGE_UNAVAILABLE', 503)
+    body = {'ticket': payload.codex_ticket}
+    if auth is not None:
+        body['auth'] = auth
+    try:
+        async with httpx.AsyncClient(timeout=15, trust_env=False, follow_redirects=False) as client:
+            async with client.stream('POST', base + '/internal/codex-auth/' + payload.run_id + '/' + operation,
+                    json=body, headers={'Authorization': 'Bearer ' + os.environ['RUNNER_TOKEN']}) as response:
+                raw = bytearray()
+                async for chunk in response.aiter_bytes():
+                    raw.extend(chunk)
+                    if len(raw) > 100000:
+                        raise ValueError()
+                if response.status_code != 200:
+                    raise ValueError()
+                result = json.loads(raw)
+                if not isinstance(result, dict):
+                    raise ValueError()
+                return result
+    except (httpx.HTTPError, ValueError, KeyError):
+        raise RunnerError('CODEX_CREDENTIAL_LEASE_FAILED', 503) from None
+
+
+@contextlib.asynccontextmanager
+async def personal_session(payload, codex):
+    result = await credential_bridge(payload, 'claim')
+    try:
+        original = codex_auth.credentials(result.get('auth'))
+    except (ValueError, TypeError, AttributeError):
+        raise RunnerError('OAUTH_CREDENTIALS_INVALID', 503) from None
+    target = codex / 'auth.json'
+    target.touch(mode=0o600, exist_ok=False)
+    target.write_text(original)
+    try:
+        yield original.encode()
+    finally:
+        refreshed = read_oauth(target).decode()
+        save = asyncio.create_task(credential_bridge(payload, 'save', refreshed))
+        try:
+            await asyncio.shield(save)
+        except asyncio.CancelledError:
+            await save
+            raise
+
+
+@contextlib.asynccontextmanager
+async def execution_auth(payload, codex, key):
+    if payload.codex_ticket:
+        async with personal_session(payload, codex) as original:
+            yield original
+    else:
+        with (oauth_session(codex) if key is None else contextlib.nullcontext()) as original:
+            yield original
 
 
 def enabled_agents() -> tuple[str, ...]:
@@ -439,7 +521,7 @@ def prepare(root: Path, payload: Execute, key: str | None) -> tuple[Path, dict[s
         target.mkdir(parents=True, mode=0o700)
         (target / "SKILL.md").write_text(skill.content, encoding="utf-8")
     instructions = build_instructions(payload, "codex")
-    model, endpoint = model_settings()
+    model, endpoint = (None, None) if payload.codex_ticket else model_settings()
     config = []
     if model is not None:
         config.append(f'model = {toml_string(model)}')
@@ -778,7 +860,7 @@ async def nothing() -> None:
 
 
 async def codex_version(executable: str) -> str | None:
-    """Version of the binary tasks really run (not the pinned constant); contacts no service."""
+    """Informational version of the installed binary; never a readiness requirement."""
     env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": tempfile.gettempdir(),
            "LANG": "C.UTF-8", "NO_COLOR": "1"}
     try:
@@ -874,7 +956,6 @@ async def build_claude_status() -> dict[str, object]:
         probe = {"state": "skipped", "reason": "CONFIG_ERROR" if config_error else "NO_CUSTOM_ENDPOINT"}
     ready = config_error is None and executable is not None and probe["state"] not in PROBE_FAILURES
     return {"enabled": True, "ready": ready, "installed": executable is not None, "version": version,
-            "pinned_version": CLAUDE_VERSION,
             "model": {"id": model, "endpoint_host": urlsplit(endpoint).hostname if endpoint else None,
                       "credential_configured": key is not None},
             "config_error": config_error, "model_endpoint": probe}
@@ -906,14 +987,15 @@ async def build_status() -> dict[str, object]:
         credential = config_error is None
     else:
         credential = bool((os.environ.get("CODEX_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip())
-    ready = (config_error is None and executable is not None and sandbox_state["state"] != "failed"
+    personal = personal_available()
+    ready = ((config_error is None or personal) and executable is not None and sandbox_state["state"] != "failed"
              and probe["state"] not in PROBE_FAILURES)
     enabled = enabled_agents()
     claude = await build_claude_status() if "claude" in enabled else {"enabled": False, "ready": False}
-    return {"ready": ready, "checked_at": int(time.time()), "auth_mode": mode,
+    return {"ready": ready, "checked_at": int(time.time()), "auth_mode": mode, "personal_auth_available": personal,
             "agents": {"codex": {"enabled": "codex" in enabled, "ready": ready and "codex" in enabled},
                        "claude": claude},
-            "codex": {"installed": executable is not None, "version": version, "pinned_version": VERSION},
+            "codex": {"installed": executable is not None, "version": version},
             "model": {"id": model, "endpoint_host": urlsplit(endpoint).hostname if endpoint else None,
                       "credential_configured": credential},
             "config_error": config_error, "sandbox": sandbox_state, "model_endpoint": probe}
@@ -936,7 +1018,7 @@ def redact(text: str, secrets: list) -> str:
 
 
 def request_secrets(payload: Execute) -> list:
-    secrets: list = [payload.attachment_capability, payload.image_capability, payload.platform_capability]
+    secrets: list = [payload.attachment_capability, payload.image_capability, payload.platform_capability, payload.codex_ticket]
     secrets.extend(v for m in payload.mcps for v in m.headers.values() if v)
     return secrets
 
@@ -989,8 +1071,7 @@ async def execute_codex(payload: Execute, key: str | None) -> str:
     with tempfile.TemporaryDirectory(prefix="agent-hub-run-") as directory:
         cwd, env = prepare(Path(directory), payload, key)
         try:
-            with (oauth_session(Path(env["CODEX_HOME"])) if key is None
-                  else contextlib.nullcontext()) as original:
+            async with execution_auth(payload, Path(env["CODEX_HOME"]), key) as original:
                 async with asyncio.timeout(TIMEOUT):
                     for mcp in payload.mcps:
                         await validate_remote(mcp)
@@ -1026,8 +1107,18 @@ app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 app.state.active = 0
 
 
+@app.middleware('http')
+async def private_auth_responses(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith('/codex-auth/'):
+        response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 async def codex_health() -> str | None:
     _, error = configured()
+    if personal_available():
+        error = None
     if not error and not shutil.which("codex"):
         error = "CODEX_CLI_NOT_INSTALLED"
     if not error and sys.platform == "linux":
@@ -1052,10 +1143,8 @@ async def health():
     # so a misconfigured optional agent does not take Codex down.
     error = next((errors[a] for a in enabled if errors[a]), None)
     ready = any(errors[a] is None for a in enabled)
-    body = {"status": "ready" if ready else "not_ready", "error": None if ready else error,
-            "codex_version": VERSION}
-    if "claude" in enabled:  # A Codex-only runner keeps the exact original response.
-        body["claude_version"] = CLAUDE_VERSION
+    body = {"status": "ready" if ready else "not_ready", "error": None if ready else error}
+    if "claude" in enabled:
         body["agents"] = {a: {"enabled": a in enabled, "ready": a in enabled and errors[a] is None,
                               "error": errors[a]} for a in AGENTS}
     return body
@@ -1078,6 +1167,35 @@ async def status(request: Request, refresh: bool = False):
             raise HTTPException(504, "STATUS_TIMEOUT") from None
         _status_cache.update(at=time.monotonic(), body=body)
         return body
+
+
+@app.get('/codex-auth/mode')
+async def codex_mode(request: Request):
+    require_token(request)
+    return authentication_mode()
+
+
+@app.post('/codex-auth/login/{identifier}')
+async def codex_login_start(identifier: str, request: Request):
+    require_token(request)
+    if not re.fullmatch(r'[a-f0-9-]{36}', identifier):
+        raise HTTPException(422, 'INVALID_LOGIN_ID')
+    if authentication_mode()['mode'] != 'personal':
+        raise HTTPException(409, 'PERSONAL_LOGIN_UNAVAILABLE')
+    return await login_manager.start(identifier, proxy_env())
+
+
+@app.get('/codex-auth/login/{identifier}/result')
+async def codex_login_result(identifier: str, request: Request):
+    require_token(request)
+    return await login_manager.read(identifier, result=True)
+
+
+@app.delete('/codex-auth/login/{identifier}')
+async def codex_login_cancel(identifier: str, request: Request):
+    require_token(request)
+    await login_manager.cancel(identifier)
+    return {'ok': True}
 
 
 @app.post("/execute")
@@ -1109,7 +1227,14 @@ async def endpoint(request: Request):
             raise HTTPException(422, "INVALID_EXECUTE_PAYLOAD") from None
         if payload.agent not in enabled_agents():
             raise HTTPException(422, "AGENT_NOT_ENABLED")
+        if payload.codex_ticket and (payload.agent != 'codex' or not personal_available()
+                                      or not re.fullmatch(r'[a-f0-9-]{36}', payload.run_id)):
+            raise HTTPException(409, 'PERSONAL_CREDENTIAL_MODE_MISMATCH')
         key, error = claude_configured() if payload.agent == "claude" else configured()
+        if payload.agent == 'codex' and personal_available():
+            if not payload.codex_ticket:
+                raise HTTPException(401, 'CODEX_PERSONAL_AUTH_REQUIRED')
+            key, error = None, None
         if error:
             raise HTTPException(503, error)
 

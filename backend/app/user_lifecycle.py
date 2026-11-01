@@ -83,6 +83,8 @@ def deactivate(db, actor, target):
         # Same effect as /stop: an answer produced afterwards is discarded and the run's tools stop working.
         run.status, run.error = 'cancelled', 'Cancelled: user deactivated'
         service.audit(db, actor, 'run.cancelled', run.id, {'source': 'deactivation'})
+    from .codex_auth import invalidate
+    invalidate(db, target.id)
     cleared = []
     for provider in list(db.scalars(select(PlatformConnection.provider).where(PlatformConnection.user_id == target.id))):
         row = pa.locked(db, target.id, provider)

@@ -11,7 +11,7 @@ vi.mock('./api', async original => ({ ...await original<typeof import('./api')>(
 
 const runner = (change: Partial<CodexRunnerStatus> = {}): CodexRunnerStatus => ({
   ready: true, checked_at: 1790000000, auth_mode: 'api',
-  codex: { installed: true, version: '0.157.1', pinned_version: '0.157.1' },
+  codex: { installed: true, version: '0.157.1' },
   model: { id: 'demo-model', endpoint_host: 'models.example.com', credential_configured: true },
   config_error: null, sandbox: { state: 'ok', error: null },
   model_endpoint: { state: 'ok', http_status: 200, model_listed: true, reason: null }, ...change,
@@ -160,8 +160,24 @@ it('shows Claude as not enabled, with how to enable it, when the runner serves C
 });
 
 it('shows the Claude checks instead of the hint once Claude is enabled', async () => {
-  answer(result({ agents: { codex: { enabled: true, ready: true }, claude: { enabled: true, ready: true, installed: true, version: '2.1.286', pinned_version: '2.1.286', model: { id: null, endpoint_host: null, credential_configured: true }, model_endpoint: { state: 'skipped', http_status: null, model_listed: null, reason: 'NO_CUSTOM_ENDPOINT' } } } }));
+  answer(result({ agents: { codex: { enabled: true, ready: true }, claude: { enabled: true, ready: true, installed: true, version: '2.1.286', model: { id: null, endpoint_host: null, credential_configured: true }, model_endpoint: { state: 'skipped', http_status: null, model_listed: null, reason: 'NO_CUSTOM_ENDPOINT' } } } }));
   render(<CodexStatus/>);
   expect(await screen.findByText('已安装 2.1.286。')).toBeTruthy();
   expect(screen.queryByText('未启用')).toBeNull();
+});
+
+it.each(['99.0.0', null])('does not reject an unknown Codex version (%s)', async version => {
+  answer(result({ codex: { installed: true, version } }));
+  render(<CodexStatus/>);
+  await screen.findByText('可用');
+  expect(within(rowOf('Codex CLI')).getByText('通过')).toBeTruthy();
+  expect(screen.queryByText(/部署固定版本/)).toBeNull();
+});
+
+it.each(['99.0.0', null])('does not reject an unknown Claude version (%s)', async version => {
+  answer(result({ agents: { codex: { enabled: true, ready: true }, claude: { enabled: true, ready: true, installed: true, version, model: { id: null, endpoint_host: null, credential_configured: true }, model_endpoint: { state: 'skipped', http_status: null, model_listed: null, reason: 'NO_CUSTOM_ENDPOINT' } } } }));
+  render(<CodexStatus/>);
+  await screen.findByText('Claude CLI');
+  expect(within(rowOf('Claude CLI')).getByText('通过')).toBeTruthy();
+  expect(screen.queryByText(/部署固定版本/)).toBeNull();
 });

@@ -5,8 +5,9 @@ import { Badge, Feedback, Loading, useData } from './ui';
 import './CodexStatus.css';
 
 export interface CodexRunnerStatus {
+  personal_auth_available?: boolean;
   ready: boolean; checked_at: number; auth_mode: 'api' | 'chatgpt' | 'invalid';
-  codex: { installed: boolean; version: string | null; pinned_version: string };
+  codex: { installed: boolean; version: string | null };
   model: { id: string | null; endpoint_host: string | null; credential_configured: boolean };
   config_error: string | null;
   sandbox: { state: 'ok' | 'failed' | 'skipped'; error: string | null };
@@ -14,7 +15,7 @@ export interface CodexRunnerStatus {
   agents?: { codex: { enabled: boolean; ready: boolean }; claude: ClaudeAgentStatus };
 }
 export interface ClaudeAgentStatus {
-  enabled: boolean; ready: boolean; installed?: boolean; version?: string | null; pinned_version?: string | null;
+  enabled: boolean; ready: boolean; installed?: boolean; version?: string | null;
   model?: { id: string | null; endpoint_host: string | null; credential_configured: boolean } | null;
   config_error?: string | null;
   model_endpoint?: { state: string; http_status: number | null; model_listed: boolean | null; reason: string | null } | null;
@@ -78,12 +79,14 @@ export function codexRows(result: CodexStatusResult): Row[] {
   const credentialBad = !!error && !modelBad;
   const rows: Row[] = [{ name: names[0], tone: 'ok', detail: '已连接执行器。' }];
   rows.push(codex.installed
-    ? { name: names[1], tone: 'ok', detail: codex.version ? (codex.version === codex.pinned_version ? `已安装 ${codex.version}。` : `已安装 ${codex.version}（部署固定版本 ${codex.pinned_version}）。`) : '已安装，但无法读取版本。' }
+    ? { name: names[1], tone: 'ok', detail: codex.version ? `已安装 ${codex.version}。` : '已安装，但无法读取版本。' }
     : { name: names[1], tone: 'fail', detail: '执行器里没有找到 Codex CLI。' });
   rows.push(modelBad
     ? { name: names[2], tone: 'fail', detail: modelConfigErrors[error] }
     : { name: names[2], tone: 'ok', detail: `${model.id ? `模型 ${model.id}` : '未指定模型，使用 Codex 默认模型'}；${model.endpoint_host ? `端点 ${model.endpoint_host}` : '默认端点'}。` });
-  rows.push(credentialBad
+  rows.push(runner.personal_auth_available
+    ? { name: names[3], tone: 'idle', detail: '支持个人 ChatGPT 授权；请在个人设置或会话中连接本人账号。' }
+    : credentialBad
     ? { name: names[3], tone: 'fail', detail: credentialErrors[error] ?? `模型凭据不可用（${error}）。` }
     : !model.credential_configured
       ? { name: names[3], tone: 'fail', detail: '没有配置模型凭据。' }
@@ -112,7 +115,7 @@ export function claudeRows(claude: ClaudeAgentStatus): Row[] {
   const keyMissing = error === 'CLAUDE_API_KEY_NOT_CONFIGURED' || claude.model?.credential_configured === false;
   const endpoint = claude.model_endpoint;
   const rows: Row[] = [claude.installed
-    ? { name: names[0], tone: 'ok', detail: claude.version ? (claude.version === claude.pinned_version ? `已安装 ${claude.version}。` : `已安装 ${claude.version}（部署固定版本 ${claude.pinned_version}）。`) : '已安装，但无法读取版本。' }
+    ? { name: names[0], tone: 'ok', detail: claude.version ? `已安装 ${claude.version}。` : '已安装，但无法读取版本。' }
     : { name: names[0], tone: 'fail', detail: '执行器里没有找到 Claude CLI。' }];
   rows.push(modelBad
     ? { name: names[1], tone: 'fail', detail: claudeConfigErrors[error] }

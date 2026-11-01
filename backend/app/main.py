@@ -43,13 +43,19 @@ async def lifespan(app):
     from .im_commands import OutboxWorker
     outbox_worker = OutboxWorker()
     outbox_worker.start()
+    from .codex_auth import AuthWorker as CodexAuthWorker
+    codex_auth_worker = CodexAuthWorker()
+    codex_auth_worker.start()
     yield
+    codex_auth_worker.stop()
     outbox_worker.stop()
     auth_worker.stop()
     worker.stop()
 
 
 app = FastAPI(title='Agent Hub API', lifespan=lifespan)
+from .codex_auth import router as codex_auth_router
+app.include_router(codex_auth_router)
 from .platform_bridge import router as platform_router
 from .attachments import router as attachment_router
 from .attachment_bridge import router as attachment_bridge_router
@@ -68,7 +74,7 @@ async def guard_origin(request: Request, call_next):
     response = await call_next(request)
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'same-origin'
-    if request.url.path.startswith(('/api/', '/internal/platform-mcp')):
+    if request.url.path.startswith(('/api/', '/internal/platform-mcp', '/internal/codex-auth/')):
         response.headers['Cache-Control'] = 'no-store'
     return response
 

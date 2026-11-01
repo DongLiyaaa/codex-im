@@ -193,11 +193,15 @@ services:
     build:
       context: ./runner
       dockerfile: Dockerfile
+      args:
+        CODEX_CLI_VERSION: ${CODEX_CLI_VERSION:-latest}
+        CLAUDE_CLI_VERSION: ${CLAUDE_CLI_VERSION:-latest}
     platform: linux/amd64
     environment:
       RUNNER_TOKEN: ${RUNNER_TOKEN:?Set RUNNER_TOKEN}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       CODEX_AUTH_MODE: ${CODEX_AUTH_MODE:-api}
+      CODEX_CREDENTIAL_BRIDGE_URL: http://api:18200
       CODEX_OAUTH_AUTH_FILE: ${CODEX_OAUTH_AUTH_FILE:-}
       # Optional OAuth: mount only its dedicated writable directory (see README).
       CODEX_MODEL: ${CODEX_MODEL:-}

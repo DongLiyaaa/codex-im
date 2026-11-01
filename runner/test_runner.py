@@ -164,10 +164,11 @@ def test_auth_and_validation_do_not_echo_secrets():
 
 def test_health_and_missing_credentials(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY")
+    monkeypatch.setattr(m.shutil, 'which', lambda _: None)
     with TestClient(m.app) as client:
-        assert client.get("/health").json()["error"] == "MODEL_API_KEY_NOT_CONFIGURED"
+        assert client.get("/health").json()["error"] == "CODEX_CLI_NOT_INSTALLED"
         assert client.post("/execute", headers={"Authorization": "Bearer " + "t" * 40},
-                           json=payload().model_dump()).status_code == 503
+                           json=payload().model_dump()).status_code == 401
 
 
 @pytest.fixture
@@ -227,12 +228,12 @@ def test_a_hanging_sandbox_check_is_reported_not_waited_for_forever(monkeypatch,
     assert clock.monotonic() - started < 5
 
 
-def test_missing_credentials_are_reported_before_any_sandbox_check(monkeypatch, fresh_sandbox_cache):
+def test_personal_mode_checks_sandbox_without_global_credentials(monkeypatch, fresh_sandbox_cache):
     calls = linux_runner(monkeypatch, "ok")
     monkeypatch.delenv("OPENAI_API_KEY")
     with TestClient(m.app) as client:
-        assert client.get("/health").json()["error"] == "MODEL_API_KEY_NOT_CONFIGURED"
-    assert calls == []
+        assert client.get("/health").json()["status"] == "ready"
+    assert calls
 
 
 def test_isolation_config(tmp_path, monkeypatch):

@@ -355,3 +355,33 @@ class IMEvent(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivery_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CodexConnection(Base):
+    __tablename__ = 'codex_connections'
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), primary_key=True)
+    generation: Mapped[str] = mapped_column(String(36), default=uid)
+    state: Mapped[str] = mapped_column(String(32), default='disconnected')
+    encrypted: Mapped[str] = mapped_column(Text, default='')
+    account: Mapped[dict] = mapped_column(JSON, default=dict)
+    lease_run_id: Mapped[str | None] = mapped_column(String(36))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ticket_hash: Mapped[str | None] = mapped_column(String(64))
+    claimed: Mapped[bool] = mapped_column(Boolean, default=False)
+    saved: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class CodexLoginJob(Base):
+    __tablename__ = 'codex_login_jobs'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), index=True)
+    phase: Mapped[str] = mapped_column(String(32), default='start', index=True)
+    encrypted_device: Mapped[str] = mapped_column(Text, default='')
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    provider: Mapped[str | None] = mapped_column(String(20))
+    identity_id: Mapped[str | None] = mapped_column(String(36))
+    app_scope: Mapped[str | None] = mapped_column(String(64))
+    im_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    delivery: Mapped[str] = mapped_column(String(32), default='web')
+    error: Mapped[str | None] = mapped_column(String(64))

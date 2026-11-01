@@ -19,11 +19,13 @@ from .models import Conversation, IMEvent, IMOutbox, PlatformApproval, PlatformC
 log = logging.getLogger(__name__)
 ACTIVE = ('queued', 'running', 'waiting_attachments')
 ALIASES = {'/help': 'help', '/帮助': 'help', '/new': 'new', '/新会话': 'new', '/reset': 'new',
-           '/stop': 'stop', '/停止': 'stop', '/status': 'status', '/状态': 'status', '/agent': 'agent'}
+           '/stop': 'stop', '/停止': 'stop', '/status': 'status', '/状态': 'status', '/agent': 'agent',
+           '/codex-login': 'codex-login', '/codex-status': 'codex-status', '/codex-logout': 'codex-logout'}
 ROLES = {'super_admin': '超级管理员', 'org_admin': '组织管理员', 'team_lead': '团队负责人', 'member': '成员'}
 STATES = {'connected': '已连接', 'pending': '待你确认', 'starting': '发起中'}
 RUN_STATES = {'queued': '排队中', 'running': '执行中', 'waiting_attachments': '等待附件解析'}
 HELP_HEAD = ('可用指令：\n'
+             '/codex-login /codex-status /codex-logout —— 私聊中管理本人的 ChatGPT 授权\n'
              '/help —— 查看本说明\n'
              '/new —— 开启新会话，之前的上下文不再带入（历史保留在 Hub）\n'
              '/agent —— 查看当前 Agent；/agent codex 或 /agent claude 切换（会开启新会话，上下文不互通）\n'
@@ -138,7 +140,22 @@ def _agent(db, user, group, conversation, name):
 
 def handle(db, command, provider, event, user, group, conversation, argument=''):
     """Runs inside the ingress transaction; queues the reply for the outbox thread."""
-    if command == 'help':
+    if command.startswith('codex-'):
+        from . import codex_auth
+        if group is not None:
+            text = '请私聊机器人发送 /codex-login 或 /codex-status；授权材料不会发到群里。'
+        elif command == 'codex-login':
+            try:
+                codex_auth.start(db, user, provider=provider)
+                text = '正在发起本人 ChatGPT 授权，稍后私发官方链接和一次性代码；勿转发。'
+            except HTTPException as exc:
+                text = str(exc.detail)
+        elif command == 'codex-logout':
+            codex_auth.invalidate(db, user.id)
+            text = '已断开本人 ChatGPT 在 Hub 的连接，不影响其他人的账号；不会注销其他 OpenAI 设备。'
+        else:
+            text = codex_auth.public(db, user)['message'] + '；完成授权后请重新发送任务。'
+    elif command == 'help':
         text = help_text(provider)
     elif command == 'status':
         text = _status(db, user, group, conversation, provider)

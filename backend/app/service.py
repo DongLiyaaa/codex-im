@@ -248,6 +248,7 @@ def build_payload(db, run, check_attachments=True):
 
 
 def execute_run(run_id):
+    personal_ticket = personal_generation = None
     try:
         with SessionLocal.begin() as db:
             run = db.get(Run, run_id)
@@ -271,6 +272,15 @@ def execute_run(run_id):
                 payload['image_capability'] = attachment_issue(run, IMAGE_AUDIENCE)
                 payload['images'] = [{'attachment_id': a.id, 'filename': a.filename, 'size': image['size'], 'sha256': image['sha256']}
                     for a in attached for image in db.get(AttachmentArtifact, a.id).manifest.get('images', [])]
+        if payload.get('agent', 'codex') == 'codex':
+            from . import codex_auth
+            source = codex_auth.mode()
+            if source['mode'] == 'personal':
+                with SessionLocal.begin() as db:
+                    run = db.get(Run, run_id)
+                    personal_ticket = codex_auth.reserve(db, run)
+                    personal_generation = codex_auth.locked(db, run.user_id).generation
+                payload['codex_ticket'] = personal_ticket
         from .im_reactions import process
         process(run_id, create=True)
         runner_url = os.getenv('RUNNER_URL', 'http://127.0.0.1:18201').rstrip('/')
@@ -303,6 +313,11 @@ def execute_run(run_id):
             current = build_payload(db, run)
             if current['skills'] != payload['skills'] or current['mcps'] != payload['mcps']:
                 raise RuntimeError('Resource grants changed during execution')
+            if personal_ticket:
+                from . import codex_auth
+                auth = codex_auth.locked(db, run.user_id)
+                if auth.generation != personal_generation or auth.state != 'connected' or not auth.saved:
+                    raise RuntimeError('本人 ChatGPT 授权已断开或需重新连接')
             db.add(Message(conversation_id=run.conversation_id, role='assistant', content=result['text']))
             run.status = 'succeeded'
             audit(db, db.get(User, run.user_id), 'run.succeeded', run.id, {'agent': run.agent})
@@ -326,6 +341,11 @@ def execute_run(run_id):
             # IM senders otherwise see silence; the notice carries no upstream detail.
             deliver(run_id, failure_notice(error))
     finally:
+        if personal_ticket:
+            from . import codex_auth
+            with SessionLocal.begin() as db:
+                run = db.get(Run, run_id)
+                codex_auth.finish(db, run, personal_ticket)
         from .im_reactions import process
         process(run_id)
 
@@ -354,6 +374,8 @@ def runner_reason(response, agent):
         code = json.loads(body).get('detail')
     except (ValueError, AttributeError):
         return None
+    if code in ('CODEX_PERSONAL_AUTH_REQUIRED', 'CODEX_CREDENTIAL_LEASE_FAILED'):
+        return '请先登录本人 ChatGPT；网页点击授权，IM 私聊发送 /codex-login'
     if code == 'AGENT_NOT_ENABLED':
         return '所选 Agent 在执行服务中未启用'
     return CLAUDE_REASONS.get(code) if agent == 'claude' and isinstance(code, str) else None

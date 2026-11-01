@@ -20,7 +20,7 @@ from app.models import User
 CANARY = 'leak-canary-5d0b7e21'
 TOKEN = 't' * 40
 STATUS = {'ready': True, 'checked_at': 1790000000, 'auth_mode': 'api',
-          'codex': {'installed': True, 'version': '0.157.1', 'pinned_version': '0.157.1'},
+          'codex': {'installed': True, 'version': '0.157.1'},
           'model': {'id': 'demo-model', 'endpoint_host': 'models.example.com', 'credential_configured': True},
           'config_error': None, 'sandbox': {'state': 'ok', 'error': None},
           'model_endpoint': {'state': 'ok', 'http_status': 200, 'model_listed': True}}
@@ -75,7 +75,7 @@ def test_the_check_returns_only_the_known_facts(monkeypatch):
     noisy = dict(STATUS, api_key=CANARY, model=dict(STATUS['model'], secret=CANARY), extra={'nested': CANARY})
     with server(lambda _: reply(body=noisy)) as (url, seen):
         result = read(url, monkeypatch)
-    assert result == {'reachable': True, 'error': None, 'runner': STATUS | {'model_endpoint': STATUS['model_endpoint'] | {'reason': None}}}
+    assert result == {'reachable': True, 'error': None, 'runner': STATUS | {'personal_auth_available': False, 'model_endpoint': STATUS['model_endpoint'] | {'reason': None}}}
     assert CANARY not in json.dumps(result) and TOKEN not in json.dumps(result)
     assert seen == [{'path': '/status', 'authorization': f'Bearer {TOKEN}'}]
 
@@ -99,7 +99,7 @@ def test_runner_errors_become_static_codes(monkeypatch, code, expected):
 @pytest.mark.parametrize('body', [b'not json', b'[]', b'{}', b'null',
                                   json.dumps(STATUS | {'auth_mode': 'other'}).encode(),
                                   json.dumps(STATUS | {'ready': 'yes please'}).encode(),
-                                  json.dumps(STATUS | {'model_endpoint': {'state': 'exploded'}}).encode(),
+                                  json.dumps(STATUS | {'personal_auth_available': False, 'model_endpoint': {'state': 'exploded'}}).encode(),
                                   json.dumps(STATUS | {'config_error': 'x' * 500}).encode(),
                                   b'{"ready": true,' + b' ' * (codex_status.LIMIT + 1) + b'}'])
 def test_malformed_or_oversized_answers_are_rejected(monkeypatch, body):
@@ -181,7 +181,7 @@ def test_a_deactivated_super_administrator_is_refused(database, monkeypatch):
 
 
 def test_claude_agent_facts_are_passed_through_and_filtered(monkeypatch):
-    claude = {'enabled': True, 'ready': True, 'installed': True, 'version': '2.1.286', 'pinned_version': '2.1.286',
+    claude = {'enabled': True, 'ready': True, 'installed': True, 'version': '2.1.286',
               'model': {'id': 'claude-x', 'endpoint_host': 'gateway.example.com', 'credential_configured': True,
                         'api_key': CANARY},
               'config_error': None, 'model_endpoint': {'state': 'ok', 'http_status': 200, 'model_listed': True},
@@ -200,3 +200,12 @@ def test_a_disabled_claude_agent_reports_only_its_state(monkeypatch):
     with server(lambda _: reply(body=body)) as (url, _):
         result = read(url, monkeypatch)
     assert result['runner']['agents']['claude']['enabled'] is False and result['runner']['agents']['claude']['model'] is None
+
+
+@pytest.mark.parametrize('version', ['99.0.0', None])
+def test_status_needs_no_fixed_cli_version(version):
+    body = {**STATUS, 'codex': {'installed': True, 'version': version}}
+    validated = codex_status.RunnerStatus.model_validate(body)
+    assert validated.ready is True
+    assert validated.codex.version == version
+    assert 'pinned_version' not in validated.model_dump()['codex']

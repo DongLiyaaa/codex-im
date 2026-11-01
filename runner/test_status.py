@@ -73,7 +73,7 @@ def test_ready_runner_reports_what_the_home_page_needs(monkeypatch):
     body = response.json()
     assert response.status_code == 200 and body["ready"] is True
     assert body["auth_mode"] == "api" and body["config_error"] is None
-    assert body["codex"] == {"installed": True, "version": "0.157.1", "pinned_version": m.VERSION}
+    assert body["codex"] == {"installed": True, "version": "0.157.1"}
     assert body["model"] == {"id": "demo-model", "endpoint_host": "models.example.com", "credential_configured": True}
     assert body["sandbox"] == {"state": "ok", "error": None}
     assert body["model_endpoint"]["state"] == "ok"
@@ -190,7 +190,7 @@ def test_a_stuck_check_gives_a_static_timeout_error(monkeypatch):
 def test_health_is_unchanged_by_the_status_check(monkeypatch):
     healthy(monkeypatch, probe={"state": "unauthorized"})
     with TestClient(m.app) as client:
-        assert set(client.get("/health").json()) == {"status", "error", "codex_version"}
+        assert set(client.get("/health").json()) == {"status", "error"}
 
 
 # ---- The endpoint probe itself, against a fake provider -------------------------------------------------------
@@ -284,3 +284,13 @@ def test_socks_proxy_is_not_probed(monkeypatch):
     monkeypatch.setenv("CODEX_PROXY_URL", "socks5://127.0.0.1:7890")
     result, seen = run_probe(lambda _: listing("demo-model"))
     assert result == {"state": "skipped", "reason": "SOCKS_PROXY_NOT_PROBED"} and seen == []
+
+
+@pytest.mark.parametrize("version", ["99.0.0", "1.0.0-beta.1", None])
+def test_version_is_informational_not_a_readiness_gate(monkeypatch, version):
+    healthy(monkeypatch, version=version)
+    body = get().json()
+    assert body["ready"] is True
+    assert body["codex"]["version"] == version
+    assert "pinned_version" not in body["codex"]
+    assert get(path="/health").json()["status"] == "ready"

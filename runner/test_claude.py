@@ -284,7 +284,7 @@ def test_health_lists_each_enabled_agent(monkeypatch):
     monkeypatch.setattr(m.sys, "platform", "darwin")
     with TestClient(m.app) as client:
         body = client.get("/health").json()
-        assert body["status"] == "ready" and body["claude_version"] == m.CLAUDE_VERSION
+        assert body["status"] == "ready"
         assert body["agents"]["claude"] == {"enabled": True, "ready": True, "error": None}
         monkeypatch.delenv("CLAUDE_API_KEY")
         body = client.get("/health").json()
@@ -319,7 +319,7 @@ def test_status_reports_claude_without_secrets(monkeypatch):
     monkeypatch.setattr(m, "codex_version", fake_version)
     body = asyncio.run(m.build_claude_status())
     assert seen == {"endpoint": "https://gateway.example.com/anthropic", "model": "claude-sonnet-5", "agent": "claude"}
-    assert body["ready"] is True and body["version"] == "2.1.286" and body["pinned_version"] == m.CLAUDE_VERSION
+    assert body["ready"] is True and body["version"] == "2.1.286"
     assert body["model"] == {"id": "claude-sonnet-5", "endpoint_host": "gateway.example.com", "credential_configured": True}
     assert "sk-ant" not in json.dumps(body) and "/anthropic" not in json.dumps(body)
 
@@ -351,7 +351,7 @@ def png() -> bytes:
 CLI = os.environ.get("CLAUDE_CLI_BIN")
 
 
-@pytest.mark.skipif(not CLI, reason="set CLAUDE_CLI_BIN to a claude binary (npm i @anthropic-ai/claude-code@2.1.286)")
+@pytest.mark.skipif(not CLI, reason="set CLAUDE_CLI_BIN to a claude binary (npm i @anthropic-ai/claude-code)")
 class TestRealCli:
     @pytest.fixture
     def services(self, monkeypatch):
@@ -411,3 +411,16 @@ class TestRealCli:
         assert exc.value.code == "CLAUDE_MCP_UNAVAILABLE"
         # The CLI may already have called the model, but never with tools, and the run's output is discarded.
         assert all(not call["request"].get("tools") for call in services.api)
+
+
+@pytest.mark.parametrize("version", ["99.0.0", "3.0.0-beta.1", None])
+def test_claude_version_is_informational(monkeypatch, version):
+    monkeypatch.setattr(m.shutil, "which", lambda name: "/usr/local/bin/" + name)
+    monkeypatch.delenv("CLAUDE_BASE_URL", raising=False)
+    async def fake_version(_):
+        return version
+    monkeypatch.setattr(m, "codex_version", fake_version)
+    body = asyncio.run(m.build_claude_status())
+    assert body["ready"] is True and body["version"] == version
+    assert "pinned_version" not in body
+    assert m.claude_health() is None

@@ -7,6 +7,7 @@ import type { User } from './api';
 
 const { request, resize } = vi.hoisted(() => ({ request: vi.fn(), resize: vi.fn() }));
 vi.mock('./api', async original => ({ ...await original<typeof import('./api')>(), api: request, post: (path: string, body: unknown) => request(path, { method: 'POST', body }) }));
+vi.mock('./CodexAuthorization', () => ({ CodexAuthorization: () => null }));
 vi.mock('./avatarImage', async original => ({ ...await original<typeof import('./avatarImage')>(), avatarFromFile: resize }));
 
 const user: User = { id: 'u1', role: 'member', org_id: 'org', team_id: 'team', active: true, name: 'Owner', email: 'owner@test.local' };

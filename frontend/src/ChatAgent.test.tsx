@@ -43,7 +43,7 @@ describe('agent choice in the workbench', () => {
 
 describe('Claude status rows', () => {
   const ok: NonNullable<NonNullable<CodexRunnerStatus['agents']>['claude']> = {
-    enabled: true, ready: true, installed: true, version: '2.1.286', pinned_version: '2.1.286',
+    enabled: true, ready: true, installed: true, version: '2.1.286',
     model: { id: 'claude-x', endpoint_host: 'gw.example.com', credential_configured: true },
     config_error: null, model_endpoint: { state: 'ok', http_status: 200, model_listed: true, reason: null },
   };
