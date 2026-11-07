@@ -24,6 +24,7 @@ afterEach(() => { cleanup(); request.mockReset(); });
 it('IM 集成 handles private chats only: no group senders, no group requests, and a pointer to 协作群组', async () => {
   const navigate = vi.fn();
   render(<Management page="integrations" user={person('super_admin')} navigate={navigate}/>);
+  fireEvent.click(await screen.findByRole('button', { name: '员工接入' }));
   expect(await screen.findByRole('heading', { name: '待接入发现' })).toBeTruthy();
   await waitFor(() => expect(request).toHaveBeenCalledWith('/im/discoveries?chat=private', expect.anything()));
   expect(asked('/im/discoveries?chat=group')).toBe(false);
@@ -33,7 +34,7 @@ it('IM 集成 handles private chats only: no group senders, no group requests, a
   expect(screen.queryByText('配置群外部 ID')).toBeNull();
   expect(screen.queryByText(/员工与群组接入/)).toBeNull();
   expect(screen.queryByText(/群填 chat_id/)).toBeNull();
-  expect(screen.getByRole('heading', { name: '员工接入' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: '飞书 · 员工接入' })).toBeTruthy();
   fireEvent.click(screen.getByText('到协作群组处理群聊'));
   expect(navigate).toHaveBeenCalledWith('groups');
 });
@@ -58,6 +59,6 @@ it.each(['org_admin', 'team_lead', 'member'] as const)('%s sees the groups page 
 it('a super administrator gets the group sender panel in the groups page and not the private one', async () => {
   render(<Management page="groups" user={person('super_admin')} navigate={vi.fn()}/>);
   await screen.findByRole('heading', { name: '群聊发送者待接入' });
-  expect(screen.getAllByText(/刷新发现/).length).toBe(1);
-  expect(screen.getByText(/群聊里 Skill \/ MCP 取用户授权与群授权的交集/)).toBeTruthy();
+  expect(screen.getAllByRole('button', { name: '刷新发现' }).length).toBe(1);
+  expect(screen.getByText(/群聊可用的 Skill \/ MCP 是用户授权与群授权的交集/)).toBeTruthy();
 });

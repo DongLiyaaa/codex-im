@@ -181,3 +181,37 @@ it.each(['99.0.0', null])('does not reject an unknown Claude version (%s)', asyn
   expect(within(rowOf('Claude CLI')).getByText('通过')).toBeTruthy();
   expect(screen.queryByText(/部署固定版本/)).toBeNull();
 });
+
+it('opens personal authorization beside the overview recheck button even in API mode', async () => {
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  request.mockImplementation(async path => path.startsWith('/system/codex-status') ? result() : { mode: 'api', state: 'disconnected', message: '', account: {} });
+  render(<CodexStatus/>);
+  await screen.findByText('可用');
+  const button = screen.getByRole('button', { name: 'ChatGPT 授权' });
+  expect(within(button.parentElement!).getByRole('button', { name: '重新检查' })).toBeTruthy();
+  expect(request.mock.calls.some(([path]) => path === '/auth/codex')).toBe(false);
+  fireEvent.click(button);
+  const dialog = await screen.findByRole('dialog');
+  expect(await within(dialog).findByText('当前使用系统配置的 API，无需个人授权。')).toBeTruthy();
+  fireEvent.click(within(dialog).getByRole('button', { name: '关闭弹窗' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+});
+
+it('hides API-only checks when personal OAuth is available', async () => {
+  request.mockImplementation(async path => path.startsWith('/system/codex-status') ? result({personal_auth_available:true,credential_source:'personal',config_error:'MODEL_API_KEY_NOT_CONFIGURED',model:{id:null,endpoint_host:null,credential_configured:false}}) : {mode:'personal',state:'disconnected',message:'尚未连接本人 ChatGPT'});
+  render(<CodexStatus/>);
+  await screen.findByText('执行器就绪');
+  expect(screen.queryByText('模型凭据')).toBeNull();
+  expect(screen.queryByText('模型端点连通')).toBeNull();
+  expect(screen.queryByText('模型与端点')).toBeNull();
+  expect(await screen.findByRole('button',{name:'登录 ChatGPT 授权'})).toBeTruthy();
+  expect(within(rowOf('沙箱')).getByText('通过')).toBeTruthy();
+});
+
+it('shared ChatGPT authentication does not display API configuration failures', async () => {
+  answer(result({auth_mode:'chatgpt',credential_source:'shared'}));
+  render(<CodexStatus/>);
+  await screen.findByText('共享 OAuth');
+  expect(screen.queryByText('模型与端点')).toBeNull();
+  expect(screen.queryByText('模型端点连通')).toBeNull();
+});

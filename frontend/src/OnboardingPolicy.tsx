@@ -8,11 +8,11 @@ interface Policy { provider: 'feishu' | 'dingtalk'; enabled: boolean; org_id: st
 const platform = (provider: string) => provider === 'feishu' ? '飞书' : '钉钉';
 
 // Off by default: a verified first private message from the application's own organization may then create a member.
-export function OnboardingPolicy() {
+export function OnboardingPolicy({ provider }: { provider?: string }) {
   const list = useData<Policy[]>('/im/onboarding-policy');
   return <section className="panel"><div className="section-heading"><h2>自动接入策略</h2><button className="text-button" onClick={list.reload}>刷新</button></div>
     <p>默认关闭。开启后，本组织员工首次私聊机器人即自动成为成员，不再逐个审批；群聊不触发，新成员默认没有任何 Skill / MCP。</p>
-    <Feedback error={list.error}/>{list.loading ? <Loading/> : <div className="integration-config-grid">{(list.data ?? []).map(p => <PolicyForm key={`${p.provider}-${p.enabled}-${p.org_id}-${p.team_id}-${p.daily_cap}`} policy={p} reload={list.reload}/>)}</div>}</section>;
+    <Feedback error={list.error}/>{list.loading ? <Loading/> : <div className="integration-config-grid">{(list.data ?? []).filter(p => !provider || p.provider === provider).map(p => <PolicyForm key={`${p.provider}-${p.enabled}-${p.org_id}-${p.team_id}-${p.daily_cap}`} policy={p} reload={list.reload}/>)}</div>}</section>;
 }
 
 function PolicyForm({ policy, reload }: { policy: Policy; reload: () => void }) {

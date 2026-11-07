@@ -1,4 +1,5 @@
-.codex-check-actions { display: flex; align-items: center; gap: 8px; }
+section[aria-labelledby="codex-check-title"] { scroll-margin-top: calc(var(--topbar-h) + 20px); }
+.codex-check-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 .codex-check { background: var(--surface); border-radius: var(--radius); padding: 0 22px; list-style: none; margin: 0; box-shadow: var(--shadow-sm); }
 .codex-check-row { display: grid; grid-template-columns: 20px minmax(96px, 150px) 1fr auto; gap: 12px; align-items: start; padding: 13px 0; border-top: 1px solid var(--line); }
 .codex-check-row:first-child { border-top: 0; }
@@ -10,6 +11,8 @@
 .codex-check-detail { color: var(--text-2); font-size: var(--fs-footnote); overflow-wrap: anywhere; }
 .codex-check-foot { margin: 8px 2px 0; color: var(--text-3); font-size: var(--fs-caption); }
 @media (max-width: 700px) {
+  section[aria-labelledby="codex-check-title"] > .section-heading { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .codex-check-actions { justify-content: flex-start; }
   .codex-check { padding: 0 16px; }
   .codex-check-row { grid-template-columns: 20px 1fr; row-gap: 4px; }
   .codex-check-detail, .codex-check-row > :last-child { grid-column: 2; }

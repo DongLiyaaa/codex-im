@@ -14,15 +14,15 @@ beforeEach(() => { sessionStorage.clear(); HTMLDialogElement.prototype.showModal
 afterEach(() => { cleanup(); request.mockReset(); });
 it('uses server pages, Enter jump, page-size reset and persisted selection', async () => {
   const view=render(<AuditPanel userId="root"/>); await screen.findByText('共 205 条 · 第 1 / 5 页');
-  fireEvent.click(screen.getByText('下一页')); await screen.findByText('共 205 条 · 第 2 / 5 页');
+  await waitFor(()=>expect((screen.getByRole('button',{name:'下一页'}) as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(screen.getByText('下一页')); await screen.findByText('共 205 条 · 第 2 / 5 页');
   fireEvent.change(screen.getByLabelText('跳转页码'),{target:{value:'4'}}); fireEvent.submit(screen.getByLabelText('跳转页码').closest('form')!);
   await screen.findByText('共 205 条 · 第 4 / 5 页');
   fireEvent.change(screen.getByLabelText('每页条数'),{target:{value:'100'}}); await screen.findByText('共 205 条 · 第 1 / 3 页');
-  fireEvent.click(screen.getByText('下一页')); await screen.findByText('共 205 条 · 第 2 / 3 页'); view.unmount(); render(<AuditPanel userId="root"/>);
+  await waitFor(()=>expect((screen.getByRole('button',{name:'下一页'}) as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(screen.getByText('下一页')); await screen.findByText('共 205 条 · 第 2 / 3 页'); view.unmount(); render(<AuditPanel userId="root"/>);
   await screen.findByText('共 205 条 · 第 2 / 3 页'); expect(request.mock.calls.some(([p])=>p==='/audit')).toBe(false);
 });
 it('recovers out of range after refresh and retries errors',async()=>{
-  render(<AuditPanel userId="root"/>); await screen.findByText('共 205 条 · 第 1 / 5 页'); fireEvent.click(screen.getByText('下一页')); await screen.findByText('共 205 条 · 第 2 / 5 页');
+  render(<AuditPanel userId="root"/>); await screen.findByText('共 205 条 · 第 1 / 5 页'); await waitFor(()=>expect((screen.getByRole('button',{name:'下一页'}) as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(screen.getByText('下一页')); await screen.findByText('共 205 条 · 第 2 / 5 页');
   request.mockResolvedValue({items:[],total:0,page:1,page_size:50,pages:1}); fireEvent.click(screen.getByText('刷新')); await screen.findByText('共 0 条 · 第 1 / 1 页');
   request.mockRejectedValue(new Error('暂时失败')); fireEvent.click(screen.getByText('刷新')); await screen.findByText('暂时失败');
   request.mockResolvedValue({items:[],total:0,page:1,page_size:50,pages:1}); fireEvent.click(screen.getByText('重试')); await screen.findByText('暂无审计记录');
@@ -92,10 +92,10 @@ it('directory preserves edits on failure, supports cancel/save and confirmed del
  render(<DirectoryPanel/>);fireEvent.click(await screen.findByText('编辑'));
  fireEvent.change(screen.getByLabelText('名称'),{target:{value:'新名称'}});fireEvent.click(screen.getByText('保存'));
  await screen.findByText('名称冲突');expect((screen.getByLabelText('名称') as HTMLInputElement).value).toBe('新名称');
- fireEvent.click(screen.getByText('取消'));expect(screen.queryByRole('dialog')).toBeNull();
+ fireEvent.click(screen.getByRole('button',{name:'关闭弹窗'}));expect(screen.getByText('有未保存的修改，是否放弃？')).toBeTruthy();fireEvent.click(screen.getByText('放弃修改'));expect(screen.queryByRole('dialog')).toBeNull();
  fireEvent.click(screen.getByText('编辑'));fail=false;fireEvent.click(screen.getByText('保存'));await screen.findByText('已保存。');
- const confirm=vi.spyOn(window,'confirm').mockReturnValue(false);fireEvent.click(screen.getByText('删除'));expect(request.mock.calls.some(([,o])=>o?.method==='DELETE')).toBe(false);
- confirm.mockReturnValue(true);fireEvent.click(screen.getByText('删除'));await screen.findByText('目录已删除。');confirm.mockRestore();
+ fireEvent.click(screen.getByText('删除'));expect(request.mock.calls.some(([,o])=>o?.method==='DELETE')).toBe(false);
+ fireEvent.click(screen.getByText('确认删除'));await screen.findByText('目录已删除。');
 });
 it('group shows names, saves members, retains failed edits and confirms archive',async()=>{
  const user={id:'u',name:'员工',email:'u@test',role:'member' as const,org_id:'o',team_id:'t',active:true};

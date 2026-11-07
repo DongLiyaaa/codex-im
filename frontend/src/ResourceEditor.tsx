@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { api } from './api';
 import type { Resource, User } from './api';
 import { Field, Form, Modal, nullable, value } from './ui';
@@ -14,6 +14,11 @@ const MASK = '***';
 type Config = { content?: string; url?: string; headers?: Record<string, string> };
 
 export function ResourceEditor({ resource, user, close, saved, directory }: { resource: Resource; user: User; close: () => void; saved: () => void; directory?: DirectoryNames | null }) {
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const lock = useRef(false);
+  const content = useRef<HTMLDivElement>(null);
+  const cancel = () => content.current?.closest('dialog')?.dispatchEvent(new Event('cancel', { cancelable: true }));
   const config = resource.config as Config;
   const isMcp = resource.kind === 'mcp';
   const [scope, setScope] = useState({ org: String(resource.org_id ?? ''), team: String(resource.team_id ?? '') });
@@ -22,6 +27,7 @@ export function ResourceEditor({ resource, user, close, saved, directory }: { re
   const [next, setNext] = useState(1);
 
   async function submit(f: FormData) {
+    if (lock.current) throw new Error('正在保存，请稍候。');
     let body: Config;
     if (isMcp) {
       const rows: HeaderRow[] = kept.map(name => ({ name, value: String(f.get(`keep_${name}`) ?? '').trim() || MASK }));
@@ -30,14 +36,15 @@ export function ResourceEditor({ resource, user, close, saved, directory }: { re
     } else {
       body = { content: prepareSkillContent(String(f.get('content') ?? '')) };
     }
-    return api(`/resources/${encodeURIComponent(resource.id)}`, {
+    lock.current = true; setBusy(true);
+    try { return await api(`/resources/${encodeURIComponent(resource.id)}`, {
       method: 'PATCH',
       body: JSON.stringify({ name: value(f, 'name'), description: isMcp ? String(f.get('description') ?? '').trim() : resource.description, org_id: nullable(f, 'org_id'), team_id: nullable(f, 'team_id'), enabled: f.has('enabled'), config: body, grant_scope: !!scope.org && f.has('grant_scope') }),
-    });
+    }); } finally { lock.current = false; setBusy(false); }
   }
 
-  return <Modal title={`编辑${isMcp ? ' MCP 服务' : ' Skill 技能'}`} close={close}>
-    <Form label="保存" submit={submit} onSuccess={saved}>
+  return <Modal title={`编辑${isMcp ? ' MCP 服务' : ' Skill 技能'}`} drawer dirty={dirty} busy={busy} close={() => { if (!lock.current) close(); }}>
+    <div ref={content}><Form label="保存" onCancel={cancel} onDirty={() => setDirty(true)} submit={submit} onSuccess={saved}>
       <Field label="名称" hint={isMcp ? undefined : '支持中英文双语，例如：广告诊断 / Ads Diagnosis'}><input aria-label="名称" name="name" required maxLength={120} defaultValue={resource.name}/></Field>
       <ScopeFields scope={scope} change={setScope} optionalOrg departmentWithOrg fixedOrg={user.role !== 'super_admin'}
         orgHint={scopeHints.org} teamHint={`${scopeHints.team}缩小范围后，范围之外已有的授权会被自动撤销。`}
@@ -51,17 +58,17 @@ export function ResourceEditor({ resource, user, close, saved, directory }: { re
           {kept.map(name => <div className="header-row" key={name}>
             <label>请求头名称<input value={name} disabled readOnly/></label>
             <label>密钥（留空表示不修改）<input name={`keep_${name}`} type="password" autoComplete="off" placeholder="已保存，不会显示" data-1p-ignore/></label>
-            <button type="button" className="secondary" onClick={() => setKept(current => current.filter(item => item !== name))}>移除</button>
+            <button type="button" className="secondary" onClick={() => { setDirty(true); setKept(current => current.filter(item => item !== name)); }}>移除</button>
           </div>)}
           {extra.map(key => <div className="header-row" key={key}>
             <label>请求头名称<input name={`new_name_${key}`} placeholder="例如 Authorization" maxLength={128} autoComplete="off"/></label>
             <label>密钥<input name={`new_value_${key}`} type="password" autoComplete="off" data-1p-ignore/></label>
-            <button type="button" className="secondary" onClick={() => setExtra(current => current.filter(item => item !== key))}>移除</button>
+            <button type="button" className="secondary" onClick={() => { setDirty(true); setExtra(current => current.filter(item => item !== key)); }}>移除</button>
           </div>)}
-          <button type="button" className="secondary" disabled={kept.length + extra.length >= HEADER_LIMIT} onClick={() => { setExtra(current => [...current, next]); setNext(n => n + 1); }}>添加请求头</button>
+          <button type="button" className="secondary" disabled={kept.length + extra.length >= HEADER_LIMIT} onClick={() => { setDirty(true); setExtra(current => [...current, next]); setNext(n => n + 1); }}>添加请求头</button>
         </fieldset>
       </> : <SkillFields initialContent={String(config.content ?? '')}/>}
       <label className="checkbox"><input type="checkbox" name="enabled" defaultChecked={resource.enabled}/>启用</label>
-    </Form>
+    </Form></div>
   </Modal>;
 }

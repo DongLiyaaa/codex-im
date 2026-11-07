@@ -49,6 +49,7 @@ def test_first_registration_concurrency_and_tombstone(database):
     with database.begin() as db:
         user = db.scalar(select(User))
         assert user.role == 'super_admin' and user.active and user.org_id is None
+        assert user.onboarding == {'status': 'pending', 'step': 'welcome', 'auto_start': True}
         assert security.verify_password(BODY['password'], user.password_hash)
         assert db.scalar(select(func.count()).select_from(User)) == 1
         db.execute(delete(User))
@@ -126,3 +127,53 @@ def test_existing_instance_ignores_bootstrap_and_empty_env_starts(database, monk
     with database.begin() as db:
         assert setup.initialized(db)
         assert db.scalar(select(User)).email == 'owner@example.invalid'
+        assert db.scalar(select(User)).onboarding == {'status': 'pending', 'step': 'welcome', 'auto_start': True}
+
+
+def test_onboarding_migration_is_additive_and_repeatable(database):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from app.im_migrations import migrate
+    engine = database.kw['bind']
+    schema = engine.get_execution_options()['schema_translate_map'][None]
+    with engine.begin() as conn:
+        quoted = engine.dialect.identifier_preparer.quote(schema)
+        conn.exec_driver_sql('SET LOCAL search_path TO ' + quoted)
+        before = conn.exec_driver_sql('SELECT id, name FROM users ORDER BY id').all()
+        conn.exec_driver_sql('ALTER TABLE users DROP COLUMN onboarding')
+        transaction = SimpleNamespace(begin=lambda: nullcontext(conn))
+        migrate(transaction)
+        migrate(transaction)
+        assert conn.exec_driver_sql('SELECT id, name FROM users ORDER BY id').all() == before
+        assert conn.exec_driver_sql('SELECT onboarding FROM users').scalars().all() == [None] * len(before)
+        rows = conn.exec_driver_sql("SELECT is_nullable, column_default FROM information_schema.columns WHERE table_schema = %s AND table_name = 'users' AND column_name = 'onboarding'", (schema,)).all()
+        assert rows == [('YES', None)]
+
+
+def test_onboarding_survives_login_and_does_not_change_other_users(database):
+    empty(database)
+    client = http(database)
+    try:
+        assert client.post('/api/setup/bootstrap', json=BODY).status_code == 201
+        login = {'email': BODY['email'], 'password': BODY['password']}
+        assert client.post('/api/auth/login', json=login).json()['onboarding']['auto_start'] is True
+        with database.begin() as db:
+            other = User(email='other@example.invalid', name='Other', role='super_admin', active=True,
+                         password_hash=security.hash_password(BODY['password']))
+            db.add(other); db.flush()
+            other_id = other.id
+        assert client.put('/api/auth/me/onboarding', json={'status': 'in_progress', 'step': 'people'}).status_code == 200
+        assert client.post('/api/auth/logout').status_code == 200
+        resumed = client.post('/api/auth/login', json=login).json()
+        assert resumed['onboarding'] == {'status': 'in_progress', 'step': 'people', 'auto_start': True}
+        assert client.put('/api/auth/me/onboarding', json={'status': 'completed', 'step': 'welcome'}).status_code == 422
+        assert client.put('/api/auth/me/onboarding', json={'user_id': other_id, 'status': 'deferred', 'step': 'people'}).status_code == 422
+        deferred = client.put('/api/auth/me/onboarding', json={'status': 'deferred', 'step': 'people'}).json()
+        assert deferred['onboarding']['auto_start'] is False
+        with database() as db:
+            assert db.get(User, other_id).onboarding is None
+        assert client.put('/api/auth/me/onboarding', json={'status': 'completed', 'step': 'try'}).status_code == 200
+        assert client.put('/api/auth/me/onboarding', json={'status': 'in_progress', 'step': 'welcome'}).json()['onboarding']['auto_start'] is False
+    finally:
+        client.close()
+        main.app.dependency_overrides.clear()

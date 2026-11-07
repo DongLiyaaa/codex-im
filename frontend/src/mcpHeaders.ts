@@ -22,6 +22,8 @@ export function buildMcpConfig(rawUrl: string, mode: HeaderMode, rows: HeaderRow
   let url: URL;
   try { url = new URL(rawUrl.trim()); } catch { throw new Error('请填写完整的 MCP 服务地址，例如 https://mcp.example.com/mcp。'); }
   if (url.protocol !== 'https:') throw new Error('MCP 服务地址必须以 https:// 开头。');
+  if (url.username || url.password || url.hash) throw new Error('MCP 地址不能包含用户名、密码或 # 片段，请将密钥放在请求头。');
+  if (url.port && url.port !== '443') throw new Error('MCP 当前仅支持 HTTPS 443 端口。');
   if (mode === 'none') return { url: url.href };
 
   // A row the user never touched is ignored; a half-filled row is an error so a missing secret is never silently dropped.

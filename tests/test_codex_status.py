@@ -75,7 +75,7 @@ def test_the_check_returns_only_the_known_facts(monkeypatch):
     noisy = dict(STATUS, api_key=CANARY, model=dict(STATUS['model'], secret=CANARY), extra={'nested': CANARY})
     with server(lambda _: reply(body=noisy)) as (url, seen):
         result = read(url, monkeypatch)
-    assert result == {'reachable': True, 'error': None, 'runner': STATUS | {'personal_auth_available': False, 'model_endpoint': STATUS['model_endpoint'] | {'reason': None}}}
+    assert result == {'reachable': True, 'error': None, 'runner': STATUS | {'credential_source': None, 'personal_auth_available': False, 'model_endpoint': STATUS['model_endpoint'] | {'reason': None}}}
     assert CANARY not in json.dumps(result) and TOKEN not in json.dumps(result)
     assert seen == [{'path': '/status', 'authorization': f'Bearer {TOKEN}'}]
 
@@ -99,7 +99,7 @@ def test_runner_errors_become_static_codes(monkeypatch, code, expected):
 @pytest.mark.parametrize('body', [b'not json', b'[]', b'{}', b'null',
                                   json.dumps(STATUS | {'auth_mode': 'other'}).encode(),
                                   json.dumps(STATUS | {'ready': 'yes please'}).encode(),
-                                  json.dumps(STATUS | {'personal_auth_available': False, 'model_endpoint': {'state': 'exploded'}}).encode(),
+                                  json.dumps(STATUS | {'credential_source': None, 'personal_auth_available': False, 'model_endpoint': {'state': 'exploded'}}).encode(),
                                   json.dumps(STATUS | {'config_error': 'x' * 500}).encode(),
                                   b'{"ready": true,' + b' ' * (codex_status.LIMIT + 1) + b'}'])
 def test_malformed_or_oversized_answers_are_rejected(monkeypatch, body):

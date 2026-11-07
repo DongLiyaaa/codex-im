@@ -54,6 +54,8 @@ async def lifespan(app):
 
 
 app = FastAPI(title='Agent Hub API', lifespan=lifespan)
+from .binding_preview import router as binding_preview_router
+app.include_router(binding_preview_router)
 from .codex_auth import router as codex_auth_router
 app.include_router(codex_auth_router)
 from .platform_bridge import router as platform_router
@@ -162,6 +164,19 @@ def logout(request: Request, response: Response, db=Depends(get_db, scope='funct
 @app.get('/api/auth/me', response_model=schemas.UserOut)
 def me(actor=Depends(current_user)):
     return actor
+
+
+@app.put('/api/auth/me/onboarding', response_model=schemas.UserOut)
+def update_onboarding(body: schemas.OnboardingUpdate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
+    user = db.scalar(select(User).where(User.id == actor.id).with_for_update().execution_options(populate_existing=True))
+    if not user or not user.active:
+        raise HTTPException(401, 'Account unavailable')
+    auto_start = bool((user.onboarding or {}).get('auto_start')) and body.status == 'in_progress'
+    progress = {**body.model_dump(), 'auto_start': auto_start}
+    if user.onboarding != progress:
+        user.onboarding = progress
+        service.audit(db, user, 'user.onboarding_update', user.id, progress)
+    return user_out(user, user)
 
 
 @app.patch('/api/auth/me', response_model=schemas.UserOut)
@@ -404,7 +419,8 @@ def delete_resource(identifier: str, actor=Depends(current_user), db=Depends(get
 @app.get('/api/bindings', response_model=list[schemas.BindingOut])
 def bindings(actor=Depends(current_user), db=Depends(get_db, scope='function')):
     own = set(policy.subject_keys(db, actor, 'user'))
-    return [b for b in db.scalars(select(Binding)) if policy.can_manage_binding(db, actor, b) or (b.subject_type, b.subject_id) in own]
+    return [{**schemas.BindingOut.model_validate(b).model_dump(), 'can_manage': policy.can_manage_binding(db, actor, b)}
+            for b in db.scalars(select(Binding)) if policy.can_manage_binding(db, actor, b) or (b.subject_type, b.subject_id) in own]
 
 
 @app.post('/api/bindings', response_model=schemas.BindingOut, status_code=201)
@@ -417,6 +433,44 @@ def create_binding(body: schemas.BindingCreate, actor=Depends(current_user), db=
     db.flush()
     service.audit(db, actor, 'binding.create', binding.id)
     return binding
+
+
+@app.put('/api/bindings/{identifier}', response_model=schemas.BindingOut)
+def update_binding(identifier: str, body: schemas.BindingCreate, actor=Depends(current_user), db=Depends(get_db, scope='function')):
+    from .directory import scope_lock, validate_scope
+    scope_lock(db)
+    binding = get_or_404(db, Binding, identifier)
+    policy.require(policy.can_manage_binding(db, actor, binding))
+    fields = ('subject_type', 'subject_id', 'resource_id')
+    previous = {key: getattr(binding, key) for key in fields}
+    target = Binding(**body.model_dump())
+    policy.require(policy.can_manage_binding(db, actor, target), 'Cannot grant this resource to the selected subject')
+    group_ids = {b.subject_id for b in (binding, target) if b.subject_type == 'group'}
+    for group_id in sorted(group_ids):
+        service.lock_group(db, group_id)
+    binding = db.scalar(select(Binding).where(Binding.id == identifier).with_for_update().execution_options(populate_existing=True))
+    if binding is None:
+        raise HTTPException(404, 'Not found')
+    if previous != {key: getattr(binding, key) for key in fields}:
+        raise HTTPException(409, '授权已被其他操作修改，请刷新后重试。')
+    policy.require(policy.can_manage_binding(db, actor, binding))
+    policy.require(policy.can_manage_binding(db, actor, target), 'Cannot grant this resource to the selected subject')
+    subject = policy.binding_subject(db, target)
+    validate_scope(db, subject.org_id, getattr(subject, 'team_id', None))
+    if target.subject_type == 'user' and not subject.active:
+        raise HTTPException(409, '目标用户已停用，请选择活跃用户。')
+    wanted = body.model_dump()
+    if previous == wanted:
+        return {**schemas.BindingOut.model_validate(binding).model_dump(), 'can_manage': True}
+    duplicate = db.scalar(select(Binding.id).where(Binding.id != identifier,
+        Binding.subject_type == body.subject_type, Binding.subject_id == body.subject_id, Binding.resource_id == body.resource_id))
+    if duplicate:
+        raise HTTPException(409, '该对象已拥有此授权，请勿重复设置。')
+    for key, value in wanted.items():
+        setattr(binding, key, value)
+    db.flush()
+    service.audit(db, actor, 'binding.update', identifier, {'previous': previous, 'current': wanted})
+    return {**schemas.BindingOut.model_validate(binding).model_dump(), 'can_manage': True}
 
 
 @app.delete('/api/bindings/{identifier}')

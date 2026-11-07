@@ -140,6 +140,21 @@ def granted_ids(db, keys):
         or_(*(and_(Binding.subject_type == kind, Binding.subject_id == identifier) for kind, identifier in keys)))))
 
 
+def resource_access_reasons(resource, *, can_send, user_granted, group_granted, in_scope):
+    reasons = []
+    if not can_send:
+        reasons.append('cannot_send')
+    if not resource.enabled:
+        reasons.append('disabled')
+    if not user_granted:
+        reasons.append('user_not_granted')
+    if not group_granted:
+        reasons.append('group_not_granted')
+    if not in_scope:
+        reasons.append('outside_scope')
+    return reasons
+
+
 def effective_resources(db, user, conversation):
     if not can_send_conversation(db, user, conversation):
         return []
@@ -149,5 +164,7 @@ def effective_resources(db, user, conversation):
         ids &= granted_ids(db, subject_keys(db, owner, 'group'))
     if not ids:
         return []
+    own_grants = granted_ids(db, [('user', user.id)]) if user.role == 'super_admin' and not conversation.group_id else set()
     return [r for r in db.scalars(select(Resource).where(Resource.id.in_(ids), Resource.enabled.is_(True)))
-            if in_resource_scope(r, owner.org_id, owner.team_id)]
+            if not resource_access_reasons(r, can_send=True, user_granted=True, group_granted=True,
+                in_scope=in_resource_scope(r, owner.org_id, owner.team_id) or r.id in own_grants)]

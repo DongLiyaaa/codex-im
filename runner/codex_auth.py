@@ -152,6 +152,85 @@ class Login:
                 await self.proc.wait()
 
 
+class ModelQuery(Login):
+    def __init__(self, identifier, executable, proxy, auth):
+        super().__init__(identifier, executable, proxy)
+        self.auth = credentials(auth)
+        self.models = []
+        self.verified = False
+        self.recovered = False
+
+    async def run(self):
+        try:
+            with tempfile.TemporaryDirectory(prefix='hub-codex-models-') as directory:
+                root = Path(directory)
+                path = root / 'auth.json'
+                path.touch(mode=0o600)
+                path.write_text(self.auth)
+                (root / 'config.toml').write_text('cli_auth_credentials_store = "file"\nforced_login_method = "chatgpt"\n')
+                env = {'PATH': os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin'), 'HOME': directory,
+                       'CODEX_HOME': directory, 'LANG': 'C.UTF-8', 'NO_COLOR': '1', **self.proxy}
+                async with asyncio.timeout(60):
+                    self.proc = await asyncio.create_subprocess_exec(self.executable, 'app-server', cwd=directory, env=env,
+                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                        limit=LIMIT, start_new_session=True)
+                    try:
+                        await self.rpc('initialize', {'clientInfo': {'name': 'agent_hub', 'title': 'Agent Hub', 'version': '0.0.4'}})
+                        await self.send('initialized', request=False)
+                        account = (await self.rpc('account/read', {'refreshToken': True})).get('account')
+                        if not isinstance(account, dict) or account.get('type') != 'chatgpt':
+                            raise ProtocolError()
+                        self.verified = True
+                        cursor, seen = None, set()
+                        models = {}
+                        for _ in range(10):
+                            result = await self.rpc('model/list', {'limit': 100, 'includeHidden': False, **({'cursor': cursor} if cursor else {})})
+                            rows = result.get('data')
+                            if not isinstance(rows, list) or len(rows) > 100:
+                                raise ProtocolError()
+                            for row in rows:
+                                if not isinstance(row, dict):
+                                    raise ProtocolError()
+                                if row.get('hidden') is True:
+                                    continue
+                                name = row.get('model')
+                                label = row.get('displayName')
+                                if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}', name):
+                                    raise ProtocolError()
+                                if not isinstance(label, str) or len(label) > 200:
+                                    raise ProtocolError()
+                                models[name] = {'model': name, 'display_name': label, 'is_default': row.get('isDefault') is True}
+                            cursor = result.get('nextCursor')
+                            if cursor is None:
+                                break
+                            if not isinstance(cursor, str) or not cursor or len(cursor) > 2048 or cursor in seen:
+                                raise ProtocolError()
+                            seen.add(cursor)
+                        else:
+                            raise ProtocolError()
+                        if len(models) > 200:
+                            raise ProtocolError()
+                        self.models = list(models.values())
+                        self.account = {k: v[:200] for k in ('email', 'planType') if isinstance((v := account.get(k)), str)}
+                        self.state = 'connected'
+                    finally:
+                        await self.terminate()
+                        if path.is_symlink() or path.stat().st_size > LIMIT:
+                            raise ProtocolError()
+                        self.auth = credentials(path.read_text())
+                        self.recovered = True
+        except asyncio.CancelledError:
+            self.state, self.auth = 'cancelled', None
+            raise
+        except (TimeoutError, OSError, ValueError, TypeError, AttributeError, ProtocolError, RuntimeError):
+            self.error, self.models = 'CODEX_MODEL_QUERY_FAILED', []
+            if self.verified and self.recovered:
+                self.state = 'connected'
+            else:
+                self.state, self.auth = 'failed', None
+
+
+
 class Manager:
     def __init__(self):
         self.jobs = {}
@@ -176,6 +255,21 @@ class Manager:
         asyncio.get_running_loop().call_later(TTL, lambda: asyncio.create_task(self.cancel(identifier)))
         return job.public()
 
+    async def start_models(self, identifier, proxy, auth):
+        await self.prune()
+        if identifier in self.jobs:
+            return self.jobs[identifier].public()
+        if len(self.jobs) >= 100 or sum(not j.task.done() for j in self.jobs.values()) >= 3:
+            raise HTTPException(429, 'CODEX_LOGIN_BUSY')
+        executable = shutil.which('codex')
+        if not executable:
+            raise HTTPException(503, 'CODEX_CLI_NOT_INSTALLED')
+        job = ModelQuery(identifier, executable, proxy, auth)
+        self.jobs[identifier] = job
+        job.task = asyncio.create_task(job.run())
+        asyncio.get_running_loop().call_later(TTL, lambda: asyncio.create_task(self.cancel(identifier)))
+        return job.public()
+
     async def cancel(self, identifier):
         job = self.jobs.pop(identifier, None)
         if job:
@@ -188,4 +282,4 @@ class Manager:
         job = self.jobs.get(identifier)
         if not job:
             raise HTTPException(404, 'CODEX_LOGIN_INTERRUPTED')
-        return {**job.public(), **({'auth': job.auth, 'account': job.account} if result and job.state == 'connected' else {})}
+        return {**job.public(), **({'auth': job.auth, 'account': job.account, **({'models': job.models} if isinstance(job, ModelQuery) else {})} if result and job.state == 'connected' else {})}

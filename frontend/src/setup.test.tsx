@@ -42,3 +42,11 @@ it('shows the author links on the setup and login pages',async()=>{
  expect(screen.getByRole('link',{name:'GitHub：DongLiyaaa'})).toBeTruthy();
  expect(screen.getByText('微信公众号：冬离鸭冬离')).toBeTruthy();expect(screen.getByText('抖音号：冬离鸭冬离')).toBeTruthy();
 });
+it.each([false,true])('offers the page help UI on public pages (initialized=%s)',async initialized=>{
+ request.mockImplementation(async(p:string)=>p==='/setup/status'?initialized:p==='/auth/me'?Promise.reject(new (await import('./api')).ApiError(401,'x')):{});
+ render(<App/>);
+ fireEvent.click(await screen.findByRole('button',{name:'本页说明'}));
+ expect(screen.getByRole('dialog',{name:`${initialized?'登录工作空间':'初始化管理员'} · 使用说明`})).toBeTruthy();
+ expect(screen.queryByText(/UI 预览|样式确认后补充/)).toBeNull();
+ expect(screen.getByText(initialized ? /输入完整登录邮箱和密码/ : /填写显示姓名和有效邮箱/)).toBeTruthy();
+});

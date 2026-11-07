@@ -1,0 +1,22 @@
+.directory-layout { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); gap: 24px; align-items: start; }
+.directory-organizations, .directory-departments { background: var(--surface); border-radius: var(--radius); padding: 24px; min-width: 0; }
+.directory-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+.directory-heading h3 { margin: 0; font-size: var(--fs-title3); }
+.directory-heading p { margin: 8px 0 0; font-size: var(--fs-footnote); }
+.directory-heading button { flex-shrink: 0; }
+.directory-filter { justify-content: flex-start; width: 100%; text-align: left; background: transparent; color: var(--text); border-radius: 10px; padding: 12px; white-space: normal; overflow-wrap: anywhere; }
+.directory-filter[aria-pressed="true"] { background: var(--brand-soft); color: var(--brand-text); font-weight: 600; }
+.directory-org { margin-top: 8px; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+.directory-org > details { padding: 8px 12px; }
+.directory-page summary { color: var(--text-3); font-size: var(--fs-caption); cursor: pointer; }
+.directory-identity { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.directory-identity strong { overflow-wrap: anywhere; }
+.directory-identity code, .directory-id { display: block; overflow-wrap: anywhere; white-space: normal; font-size: var(--fs-caption); color: var(--text-3); margin-top: 8px; }
+.directory-page .actions { flex-wrap: wrap; gap: 8px; }
+.directory-org .actions { margin-top: 12px; }
+.directory-departments .table-wrap { box-shadow: none; border-radius: 0; }
+.directory-departments td, .directory-departments th { padding: 16px 12px; }
+.directory-departments th:first-child, .directory-departments td:first-child { padding-left: 0; }
+.directory-empty { padding: 32px 0; color: var(--text-3); }
+@media (max-width: 900px) { .directory-layout { grid-template-columns: 1fr; gap: 20px; } }
+@media (max-width: 600px) { .directory-organizations, .directory-departments { padding: 16px; } .directory-heading { flex-wrap: wrap; } .directory-departments .table-wrap { overflow-x: auto; } .directory-departments table { min-width: 460px; } }

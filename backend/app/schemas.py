@@ -67,6 +67,26 @@ AVATAR_MAX_CHARS = 100_000
 AVATAR_SIGNATURES = (b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff', b'RIFF')
 
 
+OnboardingStep = Literal['welcome', 'model', 'people', 'resources', 'permissions', 'try']
+
+
+class OnboardingProgress(Input):
+    status: Literal['pending', 'in_progress', 'deferred', 'completed']
+    step: OnboardingStep
+    auto_start: bool = False
+
+
+class OnboardingUpdate(Input):
+    status: Literal['in_progress', 'deferred', 'completed']
+    step: OnboardingStep
+
+    @model_validator(mode='after')
+    def completed_step(self):
+        if self.status == 'completed' and self.step != 'try':
+            raise ValueError('请在最后一步完成阅读。')
+        return self
+
+
 class ProfileUpdate(Input):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     avatar: str | None = Field(default=None, max_length=AVATAR_MAX_CHARS)
@@ -232,6 +252,7 @@ class UserOut(Output):
     active: bool
     login_enabled: bool = True
     avatar: str | None = None
+    onboarding: OnboardingProgress | None = None
     can_manage: bool = False
     im_channels: list[str] = []
 
@@ -289,6 +310,7 @@ class ConversationStateOut(Output):
 
 
 class BindingOut(Output):
+    can_manage: bool = False
     id: str
     subject_type: str
     subject_id: str

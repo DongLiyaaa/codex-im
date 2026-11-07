@@ -28,7 +28,7 @@ it('private: asks the server for private chats only and shows nickname reasons, 
   expect(await screen.findByText('已补全 1 个飞书昵称；1 个昵称未能获取（原因见昵称列）。')).toBeTruthy();
   expect(request).toHaveBeenCalledWith('/im/discoveries/nicknames?chat=private', {});
   await waitFor(() => expect(listCalls('private')).toBe(2));
-  expect(screen.getByText(/群聊里的发送者、群登记和群成员确认，都在「协作群组」页处理/)).toBeTruthy();
+  expect(screen.getByText(/群聊接入到「协作群组」处理/)).toBeTruthy();
 });
 
 it('group: shows the group senders with group names and the reason a name is missing', async () => {
@@ -61,7 +61,7 @@ it.each([['private', [privateRow], '飞书昵称补全失败：暂时失败'], [
 it('shows an empty table for a kind with no rows rather than the other kind', async () => {
   serve([privateRow]);
   render(<DiscoveryPanel kind="group" users={[]} groups={[]} reloadMappings={() => {}}/>);
-  expect(await screen.findByText('暂无数据')).toBeTruthy();
+  expect(await screen.findByText('暂无群聊发现')).toBeTruthy();
   expect(screen.queryByText('不在飞书通讯录权限范围')).toBeNull();
 });
 
@@ -73,4 +73,21 @@ it('summarizes non-ok refresh outcomes without inventing success', () => {
   expect(nicknameSummary({ ...base, status: 'application_changed' })).toContain('结果已丢弃');
   expect(nicknameSummary({ ...base, status: 'ok' })).toBeNull();
   expect(nicknameSummary({ ...base, status: 'ok', remaining: 3, chat_remaining: 2, chat_unresolved: 1 })).toBe('1 个群名未能获取（原因见群列）；还有 5 项待下次刷新。');
+});
+
+it('platform filters isolate rows and clear hidden batch selections', async () => {
+  serve([privateRow, row('other', 'dingtalk', '钉钉员工', 'available'), { ...row('done', 'feishu', '已接入员工', 'available'), status: 'authorized' }]);
+  render(<DiscoveryPanel kind="private" provider="feishu" users={[]} groups={[]} reloadMappings={() => {}}/>);
+  await screen.findByText('ou_a');
+  expect(screen.queryByText('ou_other')).toBeNull();
+  fireEvent.click(screen.getByRole('checkbox', { name: '选择 ou_a' }));
+  expect((screen.getByRole('button', { name: '批量接入（1）' }) as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.change(screen.getByLabelText('发现状态'), { target: { value: 'authorized' } });
+  expect(screen.queryByText('ou_a')).toBeNull();
+  expect((screen.getByRole('button', { name: '批量接入' }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.change(screen.getByLabelText('搜索发现记录'), { target: { value: '不存在' } });
+  expect(screen.getByText('没有匹配的发现记录')).toBeTruthy();
+  fireEvent.click(screen.getByText('清空筛选'));
+  expect(screen.getByText('ou_a')).toBeTruthy();
+  expect(screen.getByText('ou_done')).toBeTruthy();
 });

@@ -560,3 +560,13 @@ def test_oauth_invalid_refresh_does_not_overwrite(tmp_path, monkeypatch):
         with m.oauth_session(isolated):
             (isolated / "auth.json").write_text("{")
     assert source.read_bytes() == original
+
+
+def test_skill_inventory_is_in_instructions_even_when_discovery_is_disabled(tmp_path):
+    p = payload(skills=[{'name': 'skill-id', 'display_name': '关键词库', 'content': 'PRIVATE TASK RULES'}])
+    _, env = m.prepare(tmp_path, p, 'key')
+    config = tomllib.loads((Path(env['CODEX_HOME']) / 'config.toml').read_text())
+    assert 'PRIVATE TASK RULES' in config['developer_instructions']
+    assert 'CURRENT skill inventory' in config['developer_instructions']
+    assert 'display_name' in config['developer_instructions']
+    assert config['skills']['include_instructions'] is False

@@ -10,7 +10,7 @@ from sqlalchemy import select
 from test_im_postgres import database
 from test_setup import http
 from app import codex_auth as auth, main, security, service, user_lifecycle
-from app.models import CodexConnection, CodexLoginJob, Conversation, Message, Run, User, now
+from app.models import CodexModelQuery, CodexConnection, CodexLoginJob, Conversation, Message, Run, User, now
 
 RAW = json.dumps({'auth_mode': 'chatgpt', 'tokens': {'access_token': 'test-access', 'refresh_token': 'test-refresh', 'id_token': 'test-id'}})
 
@@ -43,6 +43,7 @@ def test_durable_job_commits_credentials_before_cleanup_and_cancellation(databas
         assert row.state == 'connected' and RAW not in row.encrypted
         assert auth.unseal(row.encrypted)['auth'] == RAW
         assert db.get(CodexLoginJob, identifier).phase == 'cleanup'
+        assert db.scalar(select(CodexModelQuery.id).where(CodexModelQuery.user_id == user.id))
     assert not any(method == 'DELETE' for method, _ in calls)
     auth.perform(identifier, database)
     with database.begin() as db:
@@ -113,3 +114,29 @@ def test_revoked_generation_rejects_late_refresh(database):
         with database() as db: assert db.get(CodexConnection, user.id).encrypted == ''
     finally:
         client.close(); main.app.dependency_overrides.clear()
+
+
+def test_model_catalog_task_serializes_refresh_and_retains_selection(database, monkeypatch):
+    monkeypatch.setenv('RUNNER_TOKEN', 't' * 40)
+    with database.begin() as db:
+        user = seed(db, 'model@example.invalid')
+        row = auth.locked(db, user.id)
+        row.state, row.encrypted = 'connected', auth.seal({'auth': RAW})
+        auth.queue_models(db, user)
+        identifier = row.lease_run_id
+    def runner(method, path, body=None):
+        if method == 'POST': return {'state': 'starting'}
+        if method == 'DELETE': return {'ok': True}
+        return {'state': 'connected', 'auth': RAW, 'models': [{'model': 'actual-model', 'display_name': 'Actual model', 'is_default': True}]}
+    monkeypatch.setattr(auth, 'runner', runner)
+    auth.perform_models(identifier, database)
+    auth.perform_models(identifier, database)
+    with database() as db:
+        row = db.get(CodexConnection, user.id)
+        assert row.saved and row.lease_run_id == identifier
+        assert auth.unseal(row.encrypted)['models'][0]['model'] == 'actual-model'
+    auth.perform_models(identifier, database)
+    with database() as db:
+        row = db.get(CodexConnection, user.id)
+        assert row.lease_run_id is None and row.state == 'connected'
+        assert db.get(CodexModelQuery, identifier).phase == 'done'

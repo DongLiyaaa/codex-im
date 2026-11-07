@@ -87,3 +87,22 @@ it('ignores stale polling responses after disconnect', async () => {
   resolve(waiting);
   await waitFor(() => expect(screen.queryByText('ABCD-1234')).toBeNull());
 });
+
+it('selects only models returned for this account and saves the selected model', async () => {
+  const connected = {...empty,state:'connected',models:[{model:'from-account',display_name:'Account Model',is_default:true}],selected_model:null};
+  request.mockImplementation(async (_path, options) => options?.method === 'PUT' ? {...connected,selected_model:'from-account'} : connected);
+  render(<CodexAuthorization/>);
+  const select = await screen.findByRole('combobox',{name:'当前模型'});
+  expect(screen.getByRole('option',{name:'Account Model（推荐）'})).toBeTruthy();
+  fireEvent.change(select,{target:{value:'from-account'}});
+  fireEvent.click(screen.getByRole('button',{name:'保存模型'}));
+  await waitFor(()=>expect(request).toHaveBeenCalledWith('/auth/codex/model',{method:'PUT',body:JSON.stringify({model:'from-account'})}));
+});
+
+it('shows a loading model catalog without inventing entries', async () => {
+  request.mockResolvedValue({...empty,state:'connected',models_loading:true,models:[]});
+  render(<CodexAuthorization/>);
+  expect((await screen.findByRole('combobox',{name:'当前模型'}) as HTMLSelectElement).disabled).toBe(true);
+  expect(screen.getAllByRole('option')).toHaveLength(1);
+  expect(screen.getByText('读取模型中…')).toBeTruthy();
+});

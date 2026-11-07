@@ -184,3 +184,52 @@ def test_expired_login_is_cleared(tmp_path, monkeypatch):
     asyncio.run(job.run())
     assert job.state == 'expired' and job.auth is None and job.code is None
     assert not Path(calls[0]['cwd']).exists()
+
+
+@pytest.mark.parametrize('broken', [False, True])
+def test_model_list_uses_signed_in_account_and_preserves_refreshed_auth(tmp_path, monkeypatch, broken):
+    job = a.ModelQuery('models', 'fake', {}, AUTH)
+    class Proc:
+        returncode = 0
+    async def launch(*args, **kwargs):
+        assert 'OPENAI_API_KEY' not in kwargs['env']
+        assert Path(kwargs['env']['CODEX_HOME'], 'auth.json').read_text() == AUTH
+        return Proc()
+    calls = []
+    async def rpc(method, params):
+        calls.append((method, params))
+        if method == 'account/read':
+            return {'account': {'type': 'chatgpt', 'email': 'test@example.invalid'}}
+        if method == 'model/list':
+            if broken:
+                raise a.ProtocolError()
+            if params.get('cursor') == 'next':
+                return {'data': [{'model': 'model-b', 'displayName': 'Model B', 'hidden': False}], 'nextCursor': None}
+            return {'data': [{'model': 'model-a', 'displayName': 'Model A', 'isDefault': True}, {'model': 'hidden', 'displayName': 'Hidden', 'hidden': True}], 'nextCursor': 'next'}
+        return {}
+    async def send(*args, **kwargs): pass
+    monkeypatch.setattr(a.asyncio, 'create_subprocess_exec', launch)
+    monkeypatch.setattr(job, 'rpc', rpc)
+    monkeypatch.setattr(job, 'send', send)
+    asyncio.run(job.run())
+    assert job.state == 'connected' and job.auth == AUTH
+    assert ('account/read', {'refreshToken': True}) in calls
+    if broken:
+        assert job.models == [] and job.error == 'CODEX_MODEL_QUERY_FAILED'
+    else:
+        assert [v['model'] for v in job.models] == ['model-a', 'model-b']
+        assert job.models[0]['is_default'] is True
+
+
+def test_selected_personal_model_applied_to_real_execution_config(tmp_path, monkeypatch):
+    p = m.Execute(run_id='a' * 36, conversation_id='c', prompt='work', codex_ticket='x' * 43)
+    _, env = m.prepare(tmp_path, p, None)
+    async def bridge(payload, operation, auth=None):
+        return {'auth': AUTH, 'model': 'model-from-account'} if operation == 'claim' else {'ok': True}
+    monkeypatch.setattr(m, 'credential_bridge', bridge)
+    async def run():
+        async with m.personal_session(p, Path(env['CODEX_HOME'])):
+            import tomllib
+            config = tomllib.loads((Path(env['CODEX_HOME']) / 'config.toml').read_text())
+            assert config['model'] == 'model-from-account'
+    asyncio.run(run())

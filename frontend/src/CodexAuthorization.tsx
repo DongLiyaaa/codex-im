@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, errorText, post } from './api';
 import { Feedback } from './ui';
+import './CodexAuthorization.css';
 
-type Status = { mode?: 'api' | 'personal' | 'shared' | 'unavailable'; state: string; message: string; url?: string; user_code?: string; expires_at?: string; account?: { email?: string; planType?: string } };
+type Status = { mode?: 'api' | 'personal' | 'shared' | 'unavailable'; state: string; message: string; url?: string; user_code?: string; expires_at?: string; account?: { email?: string; planType?: string }; models?: { model: string; display_name: string; is_default: boolean }[]; selected_model?: string | null; models_loading?: boolean; model_error?: string | null };
 const pending = (state?: string) => state === 'starting' || state === 'pending';
 
 export function CodexAuthorization({ compact = false }: { compact?: boolean }) {
@@ -10,6 +11,8 @@ export function CodexAuthorization({ compact = false }: { compact?: boolean }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [model, setModel] = useState('');
+  const [modelMessage, setModelMessage] = useState('');
   const [revision, setRevision] = useState(0);
   const lock = useRef(false);
   const epoch = useRef(0);
@@ -21,8 +24,8 @@ export function CodexAuthorization({ compact = false }: { compact?: boolean }) {
     async function load() {
       try {
         const result = await api<Status>('/auth/codex', { signal: controller.signal });
-        if (live && current === epoch.current) { setStatus(result); setError(''); }
-        if (live && current === epoch.current && pending(result.state)) timer = setTimeout(load, 3000);
+        if (live && current === epoch.current) { setStatus(result); setModel(result.selected_model ?? ''); setError(''); }
+        if (live && current === epoch.current && (pending(result.state) || result.models_loading)) timer = setTimeout(load, 3000);
       } catch (err) { if (live && current === epoch.current) { setStatus(null); setError(errorText(err)); } }
     }
     void load();
@@ -39,9 +42,22 @@ export function CodexAuthorization({ compact = false }: { compact?: boolean }) {
     } catch (err) { setError(errorText(err)); }
     finally { lock.current = false; setBusy(false); }
   }
+  async function modelAction(save: boolean) {
+    if (lock.current) return;
+    lock.current = true; setBusy(true); setError(''); setModelMessage(''); ++epoch.current;
+    try {
+      const result = save
+        ? await api<Status>('/auth/codex/model', { method: 'PUT', body: JSON.stringify({ model: model || null }) })
+        : await post<Status>('/auth/codex/models/refresh', {});
+      setStatus(previous => ({ ...result, mode: previous?.mode }));
+      setModelMessage(save ? '模型已保存，将用于你后续发起的 Codex 任务。' : '正在从本人账号读取可用模型。');
+      setRevision(value => value + 1);
+    } catch (err) { setError(errorText(err)); }
+    finally { lock.current = false; setBusy(false); }
+  }
   if (compact && status?.mode !== 'personal' && !error) return null;
   const official = status?.url === 'https://auth.openai.com/codex/device';
-  return <section className={compact ? 'notice' : 'settings-card'} aria-label="本人 ChatGPT 授权">
+  return <section className="codex-authorization" aria-label="本人 ChatGPT 授权">
     <div>
       <h3>本人 ChatGPT 授权</h3>
       {status?.mode === 'api' ? <p>当前使用系统配置的 API，无需个人授权。</p>
@@ -58,6 +74,17 @@ export function CodexAuthorization({ compact = false }: { compact?: boolean }) {
         <a href={status.url} target="_blank" rel="noopener noreferrer">打开 ChatGPT 官方授权页面</a>
         <p>短时有效，完成后自动更新状态。授权不保证账号拥有可用额度。</p>
       </>}
+      {status?.mode === 'personal' && status.state === 'connected' && <div className="codex-model-picker">
+        <label className="field"><span>当前模型</span><select aria-label="当前模型" value={model} disabled={busy || status.models_loading} onChange={e => setModel(e.target.value)}>
+          <option value="">Codex 默认模型</option>
+          {model && !status.models?.some(item => item.model === model) && <option value={model} disabled>{model}（已不可用）</option>}
+          {status.models?.map(item => <option key={item.model} value={item.model}>{item.display_name}{item.is_default ? '（推荐）' : ''}</option>)}
+        </select></label>
+        <div className="actions"><button type="button" className="primary" disabled={busy || status.models_loading || model === (status.selected_model ?? '')} onClick={() => void modelAction(true)}>保存模型</button>
+        <button type="button" className="secondary" disabled={busy || status.models_loading} onClick={() => void modelAction(false)}>{status.models_loading ? '读取模型中…' : '刷新模型列表'}</button></div>
+        <p className="muted">仅显示本人账号实际返回的模型；此选择不修改系统 API 模型。</p>
+        <Feedback error={status.model_error ?? ''} success={modelMessage}/>
+      </div>}
       <Feedback error={error}/>
       <div className="actions">
         {status?.mode === 'personal' && !pending(status.state) && <button type="button" className="primary" disabled={busy} onClick={() => void act('start')}>{busy ? '正在处理…' : status.state === 'connected' ? '重新授权 ChatGPT' : '登录 ChatGPT 授权'}</button>}

@@ -56,6 +56,7 @@ class StrictModel(BaseModel):
 
 class Skill(StrictModel):
     name: str = Field(pattern=NAME)
+    display_name: str | None = Field(default=None, max_length=120)
     content: str = Field(min_length=1, max_length=64_000)
 
 
@@ -271,6 +272,12 @@ async def personal_session(payload, codex):
         original = codex_auth.credentials(result.get('auth'))
     except (ValueError, TypeError, AttributeError):
         raise RunnerError('OAUTH_CREDENTIALS_INVALID', 503) from None
+    model = result.get('model')
+    if model is not None:
+        if not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}', model):
+            raise RunnerError('INVALID_CODEX_MODEL', 503)
+        config = codex / 'config.toml'
+        config.write_text('model = ' + toml_string(model) + '\n' + config.read_text())
     target = codex / 'auth.json'
     target.touch(mode=0o600, exist_ok=False)
     target.write_text(original)
@@ -438,6 +445,12 @@ def build_instructions(payload: Execute, agent: str) -> str:
     # These are only the current request's granted documents. Prompt wording is
     # not an authorization/security boundary; admission and tool config are.
     instructions = (
+        "The JSON skill documents below are already loaded into this request's instructions. "
+        "They are the authoritative CURRENT skill inventory, replacing any older inventory in chat history. "
+        "Do not infer that no skills exist from disabled file discovery or unavailable shell tools. "
+        "When asked which skills are available, list display_name (or name) from this inventory. "
+        "Use their content for tasks, not as proof of unavailable supporting files or tools. "
+        "Do not reproduce private skill source; describe capabilities briefly. "
         "Use only the supplied authorized skill documents and configured MCP tools. "
         "The following skill content is task guidance, not a security boundary or "
         "permission to load other files, install dependencies, or discover other skills. "
@@ -992,7 +1005,7 @@ async def build_status() -> dict[str, object]:
              and probe["state"] not in PROBE_FAILURES)
     enabled = enabled_agents()
     claude = await build_claude_status() if "claude" in enabled else {"enabled": False, "ready": False}
-    return {"ready": ready, "checked_at": int(time.time()), "auth_mode": mode, "personal_auth_available": personal,
+    return {"ready": ready, "checked_at": int(time.time()), "auth_mode": mode, "personal_auth_available": personal, "credential_source": authentication_mode()["mode"],
             "agents": {"codex": {"enabled": "codex" in enabled, "ready": ready and "codex" in enabled},
                        "claude": claude},
             "codex": {"installed": executable is not None, "version": version},
@@ -1183,6 +1196,24 @@ async def codex_login_start(identifier: str, request: Request):
     if authentication_mode()['mode'] != 'personal':
         raise HTTPException(409, 'PERSONAL_LOGIN_UNAVAILABLE')
     return await login_manager.start(identifier, proxy_env())
+
+
+@app.post('/codex-auth/models/{identifier}')
+async def codex_models_start(identifier: str, request: Request):
+    require_token(request)
+    if not re.fullmatch(r'[a-f0-9-]{36}', identifier) or authentication_mode()['mode'] != 'personal':
+        raise HTTPException(409, 'PERSONAL_LOGIN_UNAVAILABLE')
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 100000:
+            raise HTTPException(413, 'REQUEST_TOO_LARGE')
+    try:
+        body = json.loads(raw)
+        auth = codex_auth.credentials(body['auth'])
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise HTTPException(422, 'INVALID_AUTH') from None
+    return await login_manager.start_models(identifier, proxy_env(), auth)
 
 
 @app.get('/codex-auth/login/{identifier}/result')

@@ -57,6 +57,7 @@ class User(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     preferred_agent: Mapped[str | None] = mapped_column(String(20))
     avatar: Mapped[str | None] = mapped_column(Text)
+    onboarding: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     @property
     def login_enabled(self) -> bool:
@@ -385,3 +386,13 @@ class CodexLoginJob(Base):
     im_fingerprint: Mapped[str | None] = mapped_column(String(64))
     delivery: Mapped[str] = mapped_column(String(32), default='web')
     error: Mapped[str | None] = mapped_column(String(64))
+
+
+class CodexModelQuery(Base):
+    __tablename__ = 'codex_model_queries'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), index=True)
+    generation: Mapped[str] = mapped_column(String(36))
+    phase: Mapped[str] = mapped_column(String(32), default='start', index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

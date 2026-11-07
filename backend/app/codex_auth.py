@@ -12,9 +12,10 @@ import httpx
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select, text
+from pydantic import BaseModel, ConfigDict, Field
 
 from .db import SessionLocal, get_db
-from .models import CodexConnection, CodexLoginJob, Run, User, now, uid
+from .models import CodexConnection, CodexLoginJob, CodexModelQuery, Run, User, now, uid
 from .security import current_user
 
 router = APIRouter(tags=['codex-auth'])
@@ -99,6 +100,13 @@ def public(db, actor):
     row = db.get(CodexConnection, actor.id)
     state = row.state if row else 'disconnected'
     result = {'state': state, 'message': STATES.get(state, '请重新授权'), 'account': row.account if row else {}}
+    if row and state == 'connected':
+        data = unseal(row.encrypted)
+        result.update(models=data.get('models', []), selected_model=data.get('selected_model'),
+                      models_checked_at=data.get('models_checked_at'), model_error=data.get('model_error'))
+        result['models_loading'] = bool(db.scalar(select(CodexModelQuery.id).where(
+            CodexModelQuery.user_id == actor.id, CodexModelQuery.generation == row.generation,
+            CodexModelQuery.phase.in_(('start', 'poll')), CodexModelQuery.expires_at > now()).limit(1)))
     if row and state in ('starting', 'pending'):
         job = db.get(CodexLoginJob, row.generation)
         if not job or job.expires_at <= now():
@@ -140,6 +148,8 @@ def invalidate(db, user_id):
     row = locked(db, user_id)
     for job in db.scalars(select(CodexLoginJob).where(CodexLoginJob.user_id == user_id, CodexLoginJob.phase != 'done')):
         job.phase, job.encrypted_device = 'cleanup', ''
+    for query in db.scalars(select(CodexModelQuery).where(CodexModelQuery.user_id == user_id, CodexModelQuery.phase != 'done')):
+        query.phase = 'cleanup'
     row.generation, row.state, row.encrypted, row.account = uid(), 'disconnected', '', {}
     row.lease_run_id = row.ticket_hash = row.lease_until = None
     row.claimed = row.saved = False
@@ -164,6 +174,136 @@ def disconnect(actor=Depends(current_user), db=Depends(get_db, scope='function')
     invalidate(db, actor.id)
     audit(db, actor, 'codex.authorization_disconnect', actor.id)
     return {'state': 'disconnected', 'message': STATES['disconnected'], 'account': {}}
+
+
+class ModelSelection(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    model: str | None = Field(default=None, min_length=1, max_length=100)
+
+
+def queue_models(db, actor):
+    row = locked(db, actor.id)
+    if not db.get(User, actor.id, populate_existing=True).active or row.state != 'connected':
+        raise HTTPException(409, '请先连接本人 ChatGPT')
+    existing = db.scalar(select(CodexModelQuery).where(CodexModelQuery.user_id == actor.id,
+        CodexModelQuery.generation == row.generation, CodexModelQuery.phase.in_(('start', 'poll'))))
+    if existing and existing.expires_at > now():
+        return
+    if row.lease_until:
+        if row.lease_until > now():
+            raise HTTPException(409, '本人 Codex 正在执行或读取模型，请稍后再试')
+        if row.claimed and not row.saved:
+            raise HTTPException(409, '上次凭据刷新结果未知，请重新授权')
+    query = CodexModelQuery(user_id=actor.id, generation=row.generation, expires_at=now() + timedelta(seconds=180))
+    db.add(query); db.flush()
+    row.lease_run_id, row.lease_until = query.id, query.expires_at
+    row.claimed, row.saved = True, False
+    row.ticket_hash = None
+
+
+@router.post('/api/auth/codex/models/refresh')
+def refresh_models(actor=Depends(current_user), db=Depends(get_db, scope='function')):
+    if mode()['mode'] != 'personal':
+        raise HTTPException(409, '当前不是个人 OAuth 模式')
+    queue_models(db, actor)
+    return public(db, actor)
+
+
+@router.put('/api/auth/codex/model')
+def choose_model(body: ModelSelection, actor=Depends(current_user), db=Depends(get_db, scope='function')):
+    if mode()['mode'] != 'personal':
+        raise HTTPException(409, '当前不是个人 OAuth 模式')
+    row = locked(db, actor.id)
+    if not db.get(User, actor.id, populate_existing=True).active or row.state != 'connected':
+        raise HTTPException(409, '请先连接本人 ChatGPT')
+    if row.lease_until and row.lease_until > now():
+        raise HTTPException(409, '本人 Codex 正忙，请稍后保存模型')
+    stored = unseal(row.encrypted)
+    if body.model is not None and body.model not in {m['model'] for m in stored.get('models', [])}:
+        raise HTTPException(422, '请选择本人账号实际返回的可用模型，必要时刷新列表')
+    row.encrypted = seal({**stored, 'selected_model': body.model})
+    return public(db, actor)
+
+
+def perform_models(identifier, factory=SessionLocal):
+    with factory.begin() as db:
+        query = db.get(CodexModelQuery, identifier)
+        if not query:
+            return
+        row = locked(db, query.user_id)
+        query = db.get(CodexModelQuery, identifier, populate_existing=True)
+        if query.phase == 'done' or (query.lease_until and query.lease_until > now()):
+            return
+        valid = (row.generation == query.generation and row.state == 'connected'
+                 and row.lease_run_id == query.id and db.get(User, query.user_id).active)
+        if query.phase != 'cleanup' and (not valid or query.lease_until or query.expires_at <= now()):
+            query.phase = 'cleanup'
+            if valid and row.lease_run_id == query.id:
+                row.state, row.encrypted = 'expired', ''
+        operation = query.phase
+        query.lease_until = now() + timedelta(seconds=40)
+        material = valid_auth(unseal(row.encrypted)['auth']) if operation == 'start' else None
+    result, error = {}, False
+    try:
+        if operation == 'start':
+            result = runner('POST', '/codex-auth/models/' + identifier, {'auth': material})
+        elif operation == 'poll':
+            result = runner('GET', '/codex-auth/login/' + identifier + '/result')
+        else:
+            try:
+                runner('DELETE', '/codex-auth/login/' + identifier)
+            except HTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+    except Exception:
+        error = True
+    with factory.begin() as db:
+        row = locked(db, query.user_id)
+        current = db.get(CodexModelQuery, identifier, populate_existing=True)
+        if current.phase != operation:
+            current.lease_until = None
+            return
+        current.lease_until = None
+        if operation == 'cleanup':
+            if not error:
+                current.phase = 'done'
+            if row.lease_run_id == identifier:
+                row.lease_run_id = row.lease_until = row.ticket_hash = None
+                row.claimed = row.saved = False
+            return
+        if (row.generation != query.generation or row.state != 'connected' or row.lease_run_id != identifier
+                or not db.get(User, query.user_id).active):
+            current.phase = 'cleanup'
+            return
+        if error or result.get('state') in ('failed', 'expired', 'cancelled'):
+            row.state, row.encrypted, current.phase = 'expired', '', 'cleanup'
+        elif result.get('state') == 'connected':
+            try:
+                raw = valid_auth(result.get('auth'))
+                if result.get('error') == 'CODEX_MODEL_QUERY_FAILED':
+                    row.encrypted = seal({**unseal(row.encrypted), 'auth': raw, 'model_error': '模型列表暂不可用，请刷新重试；现有连接保留'})
+                    row.saved, current.phase = True, 'cleanup'
+                    return
+                models = result.get('models')
+                if not isinstance(models, list) or len(models) > 200:
+                    raise ValueError()
+                safe = []
+                for model in models:
+                    if (not isinstance(model, dict) or not isinstance(model.get('model'), str)
+                            or not 1 <= len(model['model']) <= 100 or not isinstance(model.get('display_name'), str)
+                            or len(model['display_name']) > 200):
+                        raise ValueError()
+                    safe.append({k: model[k] for k in ('model', 'display_name', 'is_default')})
+                stored = unseal(row.encrypted)
+                selected = stored.get('selected_model')
+                missing = selected and selected not in {m['model'] for m in safe}
+                row.encrypted = seal({**stored, 'auth': raw, 'models': safe, 'models_checked_at': now().isoformat(),
+                    'model_error': '之前选择的模型已不可用，请重新选择' if missing else None})
+                row.saved, current.phase = True, 'cleanup'
+            except (ValueError, KeyError, TypeError):
+                row.state, row.encrypted, current.phase = 'expired', '', 'cleanup'
+        else:
+            current.phase = 'poll'
 
 
 def reserve(db, run):
@@ -224,7 +364,11 @@ async def credential_exchange(run_id: str, operation: str, request: Request, db=
         if run.status != 'running' or row.claimed:
             raise HTTPException(409, 'CREDENTIAL_ALREADY_CLAIMED')
         row.claimed = True
-        return {'auth': valid_auth(unseal(row.encrypted)['auth'])}
+        stored = unseal(row.encrypted)
+        selected = stored.get('selected_model')
+        if selected and selected not in {m['model'] for m in stored.get('models', [])}:
+            raise HTTPException(409, 'MODEL_SELECTION_UNAVAILABLE')
+        return {'auth': valid_auth(stored['auth']), **({'model': selected} if selected else {})}
     if operation == 'save':
         if not row.claimed:
             raise HTTPException(409, 'CREDENTIAL_NOT_CLAIMED')
@@ -234,7 +378,7 @@ async def credential_exchange(run_id: str, operation: str, request: Request, db=
             raise HTTPException(422, 'INVALID_AUTH') from None
         if row.saved and unseal(row.encrypted).get('auth') != raw:
             raise HTTPException(409, 'CREDENTIAL_ALREADY_SAVED')
-        row.encrypted = seal({'auth': raw})
+        row.encrypted = seal({**unseal(row.encrypted), 'auth': raw})
         row.saved = True
         return {'ok': True}
     raise HTTPException(404, 'NOT_FOUND')
@@ -334,6 +478,7 @@ def perform(identifier, factory=SessionLocal):
                 row.account = {k: v[:200] for k in ('email', 'planType') if isinstance((v := account.get(k)), str)}
                 row.encrypted, row.state = seal({'auth': raw}), 'connected'
                 current.phase, current.encrypted_device = 'cleanup', ''
+                queue_models(db, db.get(User, job.user_id))
             except Exception:
                 row.state, current.phase, current.encrypted_device = 'failed', 'cleanup', ''
         elif operation == 'deliver':
@@ -366,10 +511,15 @@ class AuthWorker:
             try:
                 with SessionLocal() as db:
                     ids = list(db.scalars(select(CodexLoginJob.id).where(CodexLoginJob.phase != 'done').limit(100)))
+                    queries = list(db.scalars(select(CodexModelQuery.id).where(CodexModelQuery.phase != 'done').limit(100)))
                 for identifier in ids:
                     if self.stopping.is_set():
                         break
                     perform(identifier)
+                for identifier in queries:
+                    if self.stopping.is_set():
+                        break
+                    perform_models(identifier)
             except Exception:
                 import logging
                 logging.getLogger(__name__).warning('Codex authorization worker unavailable')

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Chat } from './Chat';
 import { App } from './main';
 import { readRoute, useRoute } from './route';
@@ -143,4 +143,46 @@ it('shows the author links at the bottom of the workspace', async () => {
   expect(github.getAttribute('rel')).toBe('noopener noreferrer');
   expect(screen.getByText('微信公众号：冬离鸭冬离')).toBeTruthy();
   expect(screen.getByText('抖音号：冬离鸭冬离')).toBeTruthy();
+});
+
+it('keeps help contextual across navigation and collapses it on logout',async()=>{
+ render(<App/>);
+ fireEvent.click(await screen.findByRole('button',{name:'本页说明'}));
+ expect(screen.getByRole('dialog',{name:'智能会话 · 使用说明'})).toBeTruthy();
+ await act(async()=>{window.location.hash='#/resources';window.dispatchEvent(new HashChangeEvent('hashchange'));});
+ expect(await screen.findByRole('dialog',{name:'Skill和MCP管理 · 使用说明'})).toBeTruthy();
+ fireEvent.click(screen.getByRole('button',{name:'退出登录'}));
+ await screen.findByRole('heading',{name:'登录你的工作空间'});
+ expect(screen.queryByRole('dialog')).toBeNull();
+ expect(screen.getByRole('button',{name:'本页说明'}).getAttribute('aria-expanded')).toBe('false');
+});
+
+it('puts initialization first and gives the manual its own route without treating either as a management API', async () => {
+  window.history.replaceState(null, '', '#/manual'); render(<App/>);
+  const nav = await screen.findByRole('navigation', { name: '主导航' });
+  expect(within(nav).getAllByRole('button')[0].textContent).toBe('初始化引导');
+  await screen.findByRole('heading', { name: '使用说明' });
+  expect(readRoute('#/manual')).toEqual({ page: 'manual', conversationId: null });
+  expect(readRoute('#/onboarding')).toEqual({ page: 'onboarding', conversationId: null });
+  expect(request.mock.calls.some(([path]) => ['/manual', '/onboarding'].includes(path))).toBe(false);
+});
+
+it('automatically opens first-admin onboarding once per authentication and does not trap navigation', async () => {
+  const first = { ...user, id: 'first', role: 'super_admin', org_id: null, team_id: null, onboarding: { status: 'pending', step: 'welcome', auto_start: true } };
+  request.mockImplementation(async (path: string, options?: RequestInit) => path === '/setup/status' ? true : path === '/auth/me' ? first : path === '/auth/me/onboarding' ? { ...first, onboarding: { ...JSON.parse(String(options?.body)), auto_start: true } } : path === '/overview' ? {} : []);
+  window.history.replaceState(null, '', '#/resources'); render(<App/>);
+  await screen.findByRole('heading', { name: '初始化引导' });
+  expect(window.location.hash).toBe('#/onboarding');
+  await waitFor(() => expect(request.mock.calls.filter(([path]) => path === '/auth/me/onboarding')).toHaveLength(1));
+  fireEvent.click(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('button', { name: '使用说明' }));
+  await screen.findByRole('heading', { name: '使用说明' });
+  expect(window.location.hash).toBe('#/manual');
+});
+
+it.each([null, {status:'in_progress',step:'resources',auto_start:false}, {status:'deferred',step:'people',auto_start:false}, {status:'completed',step:'try',auto_start:false}])('does not redirect existing, deferred, or completed accounts (%s)', async onboarding => {
+  request.mockImplementation(async (path: string) => path === '/setup/status' ? true : path === '/auth/me' ? { ...user, role:'super_admin', onboarding } : []);
+  window.history.replaceState(null, '', '#/resources'); render(<App/>);
+  await screen.findByRole('heading', { name: 'Skill和MCP管理' });
+  expect(window.location.hash).toBe('#/resources');
+  expect(request.mock.calls.some(([path]) => path === '/auth/me/onboarding')).toBe(false);
 });

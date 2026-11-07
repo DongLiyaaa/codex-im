@@ -193,3 +193,39 @@ def test_anonymous_reset_route_cannot_be_enabled(monkeypatch):
         assert client.post('/api/auth/password-reset', json={'email': 'owner@example.invalid', 'password': 'new-password-123'}).status_code in (404, 405)
     finally:
         client.close()
+
+
+@pytest.mark.parametrize('role,group,granted,expected', [
+    ('super_admin', False, True, True), ('super_admin', False, False, False),
+    ('super_admin', True, True, False), ('member', False, True, False),
+])
+def test_admin_explicit_private_grants_do_not_expand_group_or_member_scope(monkeypatch, role, group, granted, expected):
+    resource = Resource(id='skill', name='Restricted', kind='skill', org_id='restricted', team_id='team', enabled=True, config={'content': 'private'})
+    user = SimpleNamespace(id='u', role=role, org_id=None, team_id=None)
+    conversation = SimpleNamespace(group_id='g' if group else None)
+    db = SimpleNamespace(scalars=lambda query: [resource], get=lambda cls, key: SimpleNamespace(id='g', org_id='other', team_id='other'))
+    monkeypatch.setattr(policy, 'can_send_conversation', lambda *args: True)
+    monkeypatch.setattr(policy, 'subject_keys', lambda db, owner, kind: [(kind, owner.id)])
+    monkeypatch.setattr(policy, 'granted_ids', lambda db, keys: {'skill'} if granted else set())
+    assert bool(policy.effective_resources(db, user, conversation)) is expected
+
+
+@pytest.mark.parametrize('url,error', [('http://public.example/mcp', 'HTTPS'), ('https://public.example:8443/mcp', '443'), ('https://user:secret@public.example/mcp', '用户名'), ('https://public.example/#fragment', '片段')])
+def test_mcp_url_errors_are_specific_and_redacted(url, error):
+    with pytest.raises(HTTPException) as exc:
+        service.validate_mcp_url(url)
+    assert error in exc.value.detail
+    assert 'secret' not in exc.value.detail and 'public.example' not in exc.value.detail
+
+
+def test_mcp_dns_error_is_not_reported_as_https_error(monkeypatch):
+    monkeypatch.setattr(service.socket, 'getaddrinfo', lambda *a, **k: (_ for _ in ()).throw(OSError()))
+    with pytest.raises(HTTPException) as exc: service.validate_mcp_url('https://public.example/mcp')
+    assert '解析失败' in exc.value.detail
+
+
+@pytest.mark.parametrize('address', ['127.0.0.1', '10.0.0.1', '198.18.0.1', '::ffff:8.8.8.8'])
+def test_mcp_blocks_internal_and_fake_ip_addresses(monkeypatch, address):
+    monkeypatch.setattr(service.socket, 'getaddrinfo', lambda *a, **k: [(None, None, None, None, (address, 443))])
+    with pytest.raises(HTTPException) as exc: service.validate_mcp_url('https://public.example/mcp')
+    assert '非公网' in exc.value.detail

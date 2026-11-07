@@ -23,6 +23,8 @@ def key(monkeypatch):
 class Store:
     def __init__(self, *rows):
         self.rows = {(type(row), getattr(row, 'id', None) or getattr(row, 'user_id', None)): row for row in rows}
+    def scalar(self, query):
+        return None
     def get(self, cls, key, **kwargs):
         return self.rows.get((cls, key))
 
@@ -137,3 +139,20 @@ def test_im_group_authorization_never_starts_or_displays_a_code(monkeypatch):
                        SimpleNamespace(id='group'), None)
     assert '请私聊' in queued[0].text
     assert 'http' not in queued[0].text
+
+
+def test_model_selection_is_account_scoped_and_cannot_change_during_execution(monkeypatch):
+    row = connection('u')
+    row.encrypted = auth.seal({'auth': RAW, 'models': [{'model': 'available', 'display_name': 'Available', 'is_default': True}]})
+    db = Store(User(id='u', active=True))
+    actor = SimpleNamespace(id='u')
+    monkeypatch.setattr(auth, 'mode', lambda: {'mode': 'personal'})
+    monkeypatch.setattr(auth, 'locked', lambda db, user_id: row)
+    monkeypatch.setattr(auth, 'public', lambda db, actor: {})
+    with pytest.raises(HTTPException) as exc: auth.choose_model(auth.ModelSelection(model='invented'), actor, db)
+    assert exc.value.status_code == 422
+    auth.choose_model(auth.ModelSelection(model='available'), actor, db)
+    assert auth.unseal(row.encrypted)['selected_model'] == 'available'
+    row.lease_until = now() + timedelta(seconds=30)
+    with pytest.raises(HTTPException) as exc: auth.choose_model(auth.ModelSelection(model=None), actor, db)
+    assert exc.value.status_code == 409

@@ -18,13 +18,14 @@ from .models import Conversation, IMEvent, IMOutbox, PlatformApproval, PlatformC
 
 log = logging.getLogger(__name__)
 ACTIVE = ('queued', 'running', 'waiting_attachments')
-ALIASES = {'/help': 'help', '/帮助': 'help', '/new': 'new', '/新会话': 'new', '/reset': 'new',
+ALIASES = {'/skills': 'skills', '/技能': 'skills', '/help': 'help', '/帮助': 'help', '/new': 'new', '/新会话': 'new', '/reset': 'new',
            '/stop': 'stop', '/停止': 'stop', '/status': 'status', '/状态': 'status', '/agent': 'agent',
            '/codex-login': 'codex-login', '/codex-status': 'codex-status', '/codex-logout': 'codex-logout'}
 ROLES = {'super_admin': '超级管理员', 'org_admin': '组织管理员', 'team_lead': '团队负责人', 'member': '成员'}
 STATES = {'connected': '已连接', 'pending': '待你确认', 'starting': '发起中'}
 RUN_STATES = {'queued': '排队中', 'running': '执行中', 'waiting_attachments': '等待附件解析'}
 HELP_HEAD = ('可用指令：\n'
+             '/skills —— 查看本次身份和会话实际获准使用的 Skill 名称（不含正文）\n'
              '/codex-login /codex-status /codex-logout —— 私聊中管理本人的 ChatGPT 授权\n'
              '/help —— 查看本说明\n'
              '/new —— 开启新会话，之前的上下文不再带入（历史保留在 Hub）\n'
@@ -140,7 +141,12 @@ def _agent(db, user, group, conversation, name):
 
 def handle(db, command, provider, event, user, group, conversation, argument=''):
     """Runs inside the ingress transaction; queues the reply for the outbox thread."""
-    if command.startswith('codex-'):
+    if command == 'skills':
+        resources = policy.effective_resources(db, user, conversation)
+        names = [r.name for r in resources if r.kind == 'skill']
+        text = ('当前可用 Skill：\n' + '\n'.join('• ' + name for name in names)) if names else '当前身份在此会话没有可用 Skill。请管理员检查成员归属、授权范围以及群聊的双方授权。'
+        text += '\n这是服务端核验的可用清单，不含技能原文。'
+    elif command.startswith('codex-'):
         from . import codex_auth
         if group is not None:
             text = '请私聊机器人发送 /codex-login 或 /codex-status；授权材料不会发到群里。'

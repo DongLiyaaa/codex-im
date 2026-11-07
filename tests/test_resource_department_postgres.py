@@ -358,7 +358,7 @@ def test_skill_source_hidden_over_http_but_available_to_authorized_execution(dat
         assert rows[ids[0]]['config']['content'] == text
         with database() as db:
             payload = service.build_payload(db, db.get(Run, ids[3]))
-            assert payload['skills'] == [{'name': ids[0], 'content': text}]
+            assert payload['skills'] == [{'name': ids[0], 'display_name': 'r', 'content': text}]
         with database.begin() as db:
             binding = db.scalar(select(Binding).where(Binding.resource_id == ids[0], Binding.subject_type == ('group' if group_chat else 'user')))
             db.delete(binding)
@@ -394,6 +394,82 @@ def test_markdown_create_edit_http_keeps_private_metadata(database):
         assert response.json()['config']['content'] == document
         assert response.json()['description'] == ''
         assert client.patch('/api/resources/' + saved['id'], json=update).json()['config']['content'] == document
+    finally:
+        client.close()
+        main.app.dependency_overrides.clear()
+
+
+def test_explicit_admin_grant_executes_in_private_not_unrelated_group(database):
+    with database.begin() as db:
+        root, org, ops, _ = company(db)
+        resource = create(db, root, org_id=org, team_id=ops)
+        assert policy.can_manage_binding(db, root, Binding(subject_type='user', subject_id=root.id, resource_id=resource.id))
+        grant(db, 'user', root, resource)
+        private = Conversation(owner_id=root.id, title='private')
+        db.add(private); db.flush()
+        assert [r.id for r in policy.effective_resources(db, root, private)] == [resource.id]
+        group = Group(name='global', org_id=org, team_id=None, member_ids=[root.id])
+        db.add(group); db.flush()
+        grant(db, 'group', group, resource)
+        shared = Conversation(owner_id=root.id, group_id=group.id, title='shared')
+        db.add(shared); db.flush()
+        assert policy.effective_resources(db, root, shared) == []
+
+
+def test_binding_edit_transaction_preserves_original_on_duplicate(database):
+    with database.begin() as db:
+        root, org, ops, _ = company(db)
+        resource = create(db, root, org_id=org)
+        first = person(db, 'first-edit', 'member', org, ops)
+        second = person(db, 'second-edit', 'member', org, ops)
+        grant(db, 'user', first, resource)
+        binding = db.scalar(select(Binding).where(Binding.subject_id == first.id))
+        identifier, root_id, resource_id, second_id = binding.id, root.id, resource.id, second.id
+    with database.begin() as db:
+        result = main.update_binding(identifier, schemas.BindingCreate(subject_type='user', subject_id=second_id, resource_id=resource_id), db.get(User, root_id), db)
+        assert result['id'] == identifier
+    with database.begin() as db:
+        resource2 = create(db, db.get(User, root_id), name='second-resource', org_id=org)
+        grant(db, 'user', db.get(User, second_id), resource2)
+        duplicate_resource_id = resource2.id
+    with pytest.raises(HTTPException) as exc:
+        with database.begin() as db:
+            main.update_binding(identifier, schemas.BindingCreate(subject_type='user', subject_id=second_id, resource_id=duplicate_resource_id), db.get(User, root_id), db)
+    assert exc.value.status_code == 409
+    with database() as db:
+        row = db.get(Binding, identifier)
+        assert row.subject_id == second_id and row.resource_id == resource_id
+
+
+def test_binding_preview_http_matches_runtime_and_hides_source(database):
+    from test_setup import http
+    from app import security
+    with database.begin() as db:
+        root, org, ops, _ = company(db)
+        root.password_hash = security.hash_password('preview-test-password')
+        user = person(db, 'preview-member', 'member', org, ops)
+        resource = create(db, root, org_id=org, team_id=ops)
+        grant(db, 'user', user, resource)
+        group = Group(name='Preview group', org_id=org, team_id=ops, member_ids=[user.id])
+        db.add(group); db.flush()
+        private = Conversation(owner_id=user.id, title='Preview private')
+        shared = Conversation(owner_id=user.id, group_id=group.id, title='Preview shared')
+        db.add_all([private, shared]); db.flush()
+    client = http(database)
+    try:
+        assert client.post('/api/auth/login', json={'email': root.email, 'password': 'preview-test-password'}).status_code == 200
+        for conversation in (private, shared):
+            params = {'user_id': user.id}
+            if conversation.group_id: params['group_id'] = conversation.group_id
+            response = client.get('/api/bindings/preview', params=params)
+            assert response.status_code == 200
+            result = response.json()
+            with database() as db:
+                expected = policy.effective_resources(db, db.get(User, user.id), db.get(Conversation, conversation.id))
+                assert {r['id'] for r in result['resources'] if r['effective']} == {r.id for r in expected}
+            assert all('config' not in row for row in result['resources'])
+            if conversation.group_id:
+                assert result['resources'][0]['reasons'] == ['group_not_granted']
     finally:
         client.close()
         main.app.dependency_overrides.clear()

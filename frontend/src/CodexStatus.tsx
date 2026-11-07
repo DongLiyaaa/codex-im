@@ -1,11 +1,13 @@
 import { useState } from 'react';
-import { CircleCheck, CircleMinus, CircleX, RefreshCw } from 'lucide-react';
+import { CircleCheck, CircleMinus, CircleX, RefreshCw, KeyRound } from 'lucide-react';
 import { dateText } from './api';
-import { Badge, Feedback, Loading, useData } from './ui';
+import { Badge, Feedback, Loading, Modal, useData } from './ui';
 import './CodexStatus.css';
+import { CodexAuthorization } from './CodexAuthorization';
 
 export interface CodexRunnerStatus {
   personal_auth_available?: boolean;
+  credential_source?: 'api' | 'personal' | 'shared' | 'unavailable';
   ready: boolean; checked_at: number; auth_mode: 'api' | 'chatgpt' | 'invalid';
   codex: { installed: boolean; version: string | null };
   model: { id: string | null; endpoint_host: string | null; credential_configured: boolean };
@@ -81,11 +83,13 @@ export function codexRows(result: CodexStatusResult): Row[] {
   rows.push(codex.installed
     ? { name: names[1], tone: 'ok', detail: codex.version ? `已安装 ${codex.version}。` : '已安装，但无法读取版本。' }
     : { name: names[1], tone: 'fail', detail: '执行器里没有找到 Codex CLI。' });
+  const apiMode = runner.credential_source === 'api' || (!runner.personal_auth_available && runner.auth_mode !== 'chatgpt' && runner.credential_source !== 'personal' && runner.credential_source !== 'shared');
+  if (apiMode) {
   rows.push(modelBad
     ? { name: names[2], tone: 'fail', detail: modelConfigErrors[error] }
     : { name: names[2], tone: 'ok', detail: `${model.id ? `模型 ${model.id}` : '未指定模型，使用 Codex 默认模型'}；${model.endpoint_host ? `端点 ${model.endpoint_host}` : '默认端点'}。` });
   rows.push(runner.personal_auth_available
-    ? { name: names[3], tone: 'idle', detail: '支持个人 ChatGPT 授权；请在个人设置或会话中连接本人账号。' }
+    ? { name: names[3], tone: 'idle', detail: '支持个人 ChatGPT 授权；请使用此处授权入口连接本人账号。' }
     : credentialBad
     ? { name: names[3], tone: 'fail', detail: credentialErrors[error] ?? `模型凭据不可用（${error}）。` }
     : !model.credential_configured
@@ -99,6 +103,9 @@ export function codexRows(result: CodexStatusResult): Row[] {
     rows.push({ name: names[4], tone: 'idle', detail: skipReasons[endpoint.reason ?? ''] ?? '未检查。' });
   } else {
     rows.push({ name: names[4], tone: 'fail', detail: `${endpointFailures[endpoint.state] ?? '端点检查失败。'}${endpoint.http_status ? `（HTTP ${endpoint.http_status}）` : ''}` });
+  }
+  } else {
+    rows.push({ name: '登录方式', tone: 'idle', badge: runner.personal_auth_available ? '个人 OAuth' : '共享 OAuth', detail: runner.personal_auth_available ? '使用本人 ChatGPT 登录，不需要配置 API Key 或模型端点。' : '使用部署明确配置的共享 ChatGPT 登录。' });
   }
   rows.push(sandbox.state === 'ok'
     ? { name: names[5], tone: 'ok', detail: '沙箱可以启动，任务能在其中安全执行。' }
@@ -145,6 +152,7 @@ function Checks({ label, rows }: { label: string; rows: Row[] }) {
 
 export function CodexStatus() {
   const [forced, setForced] = useState(false);
+  const [authorizationOpen, setAuthorizationOpen] = useState(false);
   const { data, error, loading, reload } = useData<CodexStatusResult>(forced ? '/system/codex-status?refresh=true' : '/system/codex-status');
   const valid = !!data && typeof data === 'object' && !Array.isArray(data) && typeof data.reachable === 'boolean';
   const ready = valid && data.reachable && data.runner?.ready === true;
@@ -153,14 +161,16 @@ export function CodexStatus() {
   return <section aria-labelledby="codex-check-title">
     <div className="section-heading">
       <h2 id="codex-check-title">Codex CLI 接入检查</h2>
-      <span className="codex-check-actions">
-        {valid && <Badge tone={ready ? 'green' : 'red'}>{ready ? '可用' : '不可用'}</Badge>}
+      <div className="codex-check-actions">
+        {valid && <Badge tone={ready ? 'green' : 'red'}>{ready ? (data.runner?.personal_auth_available ? '执行器就绪' : '可用') : '不可用'}</Badge>}
+        <button type="button" className="text-button" onClick={() => setAuthorizationOpen(true)}><KeyRound size={15}/>ChatGPT 授权</button>
         <button className="text-button" onClick={recheck} disabled={loading}><RefreshCw size={15}/>重新检查</button>
-      </span>
+      </div>
     </div>
     <Feedback error={error || (data && !valid ? '检查结果的格式无法识别。' : '')}/>
     {loading ? <Loading/> : valid && <>
       <Checks label="Codex CLI 检查项" rows={codexRows(data)}/>
+      {data.runner?.personal_auth_available && <CodexAuthorization/>}
       {data.runner && !data.runner.agents?.claude?.enabled && <>
         <div className="section-heading"><h2>Claude CLI 接入检查</h2><Badge>未启用</Badge></div>
         <Checks label="Claude CLI 检查项" rows={[claudeDisabledRow]}/>
@@ -171,5 +181,6 @@ export function CodexStatus() {
       </>}
       {data.runner && <div className="codex-check-foot">上次检查：{dateText(new Date(data.runner.checked_at * 1000).toISOString())}。结果缓存约 30 秒。</div>}
     </>}
+    {authorizationOpen && <Modal title="本人 ChatGPT 授权" close={() => setAuthorizationOpen(false)}><CodexAuthorization/></Modal>}
   </section>;
 }

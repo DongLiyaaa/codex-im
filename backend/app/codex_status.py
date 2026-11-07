@@ -67,6 +67,7 @@ class Agents(BaseModel):
 
 
 class RunnerStatus(BaseModel):
+    credential_source: Literal['api', 'personal', 'shared', 'unavailable'] | None = None
     personal_auth_available: bool = False
     ready: bool
     checked_at: int

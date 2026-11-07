@@ -29,14 +29,26 @@ def audit(db, actor, action, target_id=None, details=None):
 def validate_mcp_url(url):
     try:
         parsed = urlsplit(url)
-        if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.fragment
-                or parsed.port not in (None, 443) or len(url) > 4096 or any(c.isspace() for c in url)):
+        port = parsed.port
+        if not parsed.hostname or len(url) > 4096 or any(c.isspace() or ord(c) < 32 for c in url):
             raise ValueError()
-        addresses = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
-        if not addresses or any(not ipaddress.ip_address(item[4][0]).is_global for item in addresses):
-            raise ValueError()
-    except (ValueError, OSError):
-        raise HTTPException(422, 'MCP URL must resolve exclusively to public HTTPS addresses')
+    except ValueError:
+        raise HTTPException(422, 'MCP 地址格式无效，请填写完整服务地址。') from None
+    if parsed.scheme != 'https':
+        raise HTTPException(422, 'MCP 服务地址必须使用 HTTPS。')
+    if parsed.username or parsed.password or parsed.fragment:
+        raise HTTPException(422, 'MCP 地址不能包含用户名、密码或 # 片段，请将密钥放在请求头。')
+    if port not in (None, 443):
+        raise HTTPException(422, 'MCP 当前仅支持 HTTPS 443 端口，请使用公网 HTTPS 反向代理。')
+    try:
+        addresses = socket.getaddrinfo(parsed.hostname, port or 443, type=socket.SOCK_STREAM)
+    except OSError:
+        raise HTTPException(422, 'MCP 域名解析失败，请检查域名和服务器 DNS；这不是 HTTPS 格式错误。') from None
+    if not addresses:
+        raise HTTPException(422, 'MCP 域名没有可用的解析地址。')
+    if any(not ipaddress.ip_address(item[4][0]).is_global or
+           getattr(ipaddress.ip_address(item[4][0]), 'ipv4_mapped', None) is not None for item in addresses):
+        raise HTTPException(422, 'MCP 域名解析包含非公网地址，已阻止访问内网或本机；请检查 DNS/代理解析。')
 
 
 def normalize_skill_config(name, config):
@@ -218,7 +230,7 @@ def build_payload(db, run, check_attachments=True):
         config = resource_secrets.reveal_config(resource.kind, resource.config)
         validate_resource(resource.kind, config)
         if resource.kind == 'skill':
-            skills.append({'name': resource.id, 'content': config['content']})
+            skills.append({'name': resource.id, 'display_name': resource.name, 'content': config['content']})
         else:
             mcps.append({'name': resource.id, 'url': config['url'], 'headers': config.get('headers', {})})
     message = db.get(Message, run.message_id)

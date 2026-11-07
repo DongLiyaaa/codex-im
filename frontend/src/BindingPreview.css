@@ -1,0 +1,14 @@
+.binding-preview { padding: 24px; }
+.binding-preview > p { line-height: 1.65; margin-top: 0; }
+.preview-section { margin-top: 28px; }
+.preview-section h3 { display: flex; gap: 8px; align-items: center; font-size: var(--fs-headline); }
+.preview-section ul { list-style: none; padding: 0; margin: 0; }
+.preview-section li { padding: 16px 0; border-top: 1px solid var(--line); }
+.preview-resource { display: flex; gap: 12px; justify-content: space-between; align-items: flex-start; }
+.preview-resource strong { min-width: 0; overflow-wrap: anywhere; }
+.preview-section p { margin: 8px 0; color: var(--text-2); font-size: var(--fs-footnote); }
+.preview-section small { display: block; margin-top: 8px; color: var(--text-3); line-height: 1.5; }
+.binding-filters { display: flex; align-items: end; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+.binding-filters .field { margin: 0; flex: 1 1 200px; }
+.binding-filters .field:first-child { flex: 2 1 280px; }
+@media (max-width: 600px) { .binding-preview { padding: 20px 16px; } }
