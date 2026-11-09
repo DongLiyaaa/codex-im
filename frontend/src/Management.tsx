@@ -213,10 +213,10 @@ function ConfigForm({ config, reload, onDirty }: { config: IMConfig; reload: () 
   const [saveError, setSaveError] = useState('');
   const [mode, setMode] = useState(config.transport); const [cleared, setCleared] = useState<string[]>([]);
   const feishu = config.provider === 'feishu';
+  const persistent = feishu ? 'websocket' : 'stream';
   const fields = feishu ? ['APP_ID', 'APP_SECRET', ...(mode === 'webhook' ? ['VERIFICATION_TOKEN', 'ENCRYPT_KEY'] : [])] : mode === 'stream' ? ['CLIENT_ID', 'CLIENT_SECRET', 'ROBOT_CODE'] : ['CLIENT_ID', 'ROBOT_CODE', 'APP_SECRET', 'ROBOT_ACCESS_TOKEN', 'ROBOT_CHAT_ID', 'ROBOT_SECRET'];
-  
   const { register, handleSubmit, formState: { isSubmitting } } = useForm();
-  
+  const modeField = <Field label="接入模式"><select value={mode} onChange={e => { setMode(e.target.value); setCleared([]); }}><option value={persistent}>{feishu ? 'WebSocket 长连接（推荐）' : 'Stream 长连接（推荐）'}</option><option value="webhook">{feishu ? 'Webhook 回调' : 'Legacy Webhook 固定群'}</option></select></Field>;
   return <><p>{config.source === 'database' ? `已保存至加密配置 · 版本 ${config.revision}` : '当前使用环境配置 · 尚未网页保存'}</p><form onChange={onDirty} onSubmit={handleSubmit(async (data) => {
     setSaveError('');
     const values = Object.fromEntries(fields.map(name => [name, cleared.includes(name) ? '' : String(data[name] ?? '')]));
@@ -226,5 +226,8 @@ function ConfigForm({ config, reload, onDirty }: { config: IMConfig; reload: () 
     } catch (e) {
       setSaveError(errorText(e));
     }
-  })}><fieldset disabled={isSubmitting} style={{ border: 'none', padding: 0, margin: 0 }}><Field label="接入模式"><select value={mode} onChange={e => { setMode(e.target.value); setCleared([]); }}><option value={feishu ? 'websocket' : 'stream'}>{feishu ? 'WebSocket 长连接' : 'Stream 长连接'}</option><option value="webhook">{feishu ? 'Webhook 回调' : 'Legacy Webhook 固定群'}</option></select></Field>{fields.map(name => { const secret = name in config.secrets_set; return <div key={name}><Field label={fieldLabels[name]} hint={secret ? config.secrets_set[name] ? '已设置；留空保留原值。不会返回或显示已有密钥。' : '尚未设置' : '留空保留；清空已有值请勾选下方清除。'}><input {...register(name)} type={secret ? 'password' : 'text'} autoComplete="off" defaultValue={secret ? '' : config.fields[name] ?? ''} disabled={cleared.includes(name)} maxLength={4096}/></Field><label className="checkbox im-clear"><input type="checkbox" checked={cleared.includes(name)} onChange={e => setCleared(e.target.checked ? [...cleared, name] : cleared.filter(x => x !== name))}/>保存时明确清除 {fieldLabels[name]}</label></div>; })}<p className="im-help">保存即生效：回调和回复读取新配置，常驻连接按更新重连。清除必填凭据会停止连接；留空不会清除。测试连接未提供，请按实际连接状态和平台后台检查。</p><Feedback error={saveError}/><div className="form-actions"><button className="primary" type="submit" disabled={isSubmitting}>{isSubmitting && <RefreshCw size={16} className="spin"/>}{isSubmitting ? '正在提交…' : '保存应用配置'}</button></div></fieldset></form></>;
+  })}><fieldset disabled={isSubmitting} style={{ border: 'none', padding: 0, margin: 0 }}>
+    {mode === persistent ? <details className="im-advanced"><summary>其他接入方式</summary><p>默认长连接无需公网回调。只有已有平台回调配置时才需要改用 Webhook。</p>{modeField}</details> : modeField}
+    {fields.map(name => { const secret = name in config.secrets_set; const hasValue = secret ? config.secrets_set[name] : !!config.fields[name]; return <div key={name}><Field label={fieldLabels[name]} hint={secret ? hasValue ? '已保存；留空保持不变' : '尚未设置' : undefined}><input {...register(name)} type={secret ? 'password' : 'text'} autoComplete="off" defaultValue={secret ? '' : config.fields[name] ?? ''} disabled={cleared.includes(name)} maxLength={4096}/></Field>{hasValue && <details className="im-clear"><summary>清除已有 {fieldLabels[name]}</summary><label className="checkbox"><input type="checkbox" checked={cleared.includes(name)} onChange={e => setCleared(e.target.checked ? [...cleared, name] : cleared.filter(x => x !== name))}/>确认在保存时清除，不能用空白代替</label></details>}</div>; })}
+    <p className="im-help">留空保留已有值，密钥不会回显。保存后请查看真实连接状态，再到 IM 发送测试消息；保存不等于平台权限已验证。</p><Feedback error={saveError}/><div className="form-actions"><button className="primary" type="submit" disabled={isSubmitting}>{isSubmitting && <RefreshCw size={16} className="spin"/>}{isSubmitting ? '正在提交…' : '保存应用配置'}</button></div></fieldset></form></>;
 }

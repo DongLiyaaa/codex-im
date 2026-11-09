@@ -51,6 +51,13 @@ describe('per-page manual coverage', () => {
     expect(text('directory', 'member')).toContain('当前角色无权');
   });
 
+  it('documents effective capability counts and supervised authorization targets', () => {
+    expect(text('chat', 'super_admin')).toContain('右上角数字是当前会话实际生效的数量');
+    expect(text('chat', 'super_admin')).toContain('只读监管默认授权给会话所属用户');
+    expect(text('chat', 'super_admin')).toContain('已授权，右上角数量为什么仍是 0');
+    expect(text('chat', 'member')).not.toContain('管理授权');
+  });
+
   it('keeps critical scope, security and authentication distinctions explicit', () => {
     expect(text('bindings', 'super_admin')).toContain('交集');
     expect(text('bindings', 'super_admin')).toContain('只读');

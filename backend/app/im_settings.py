@@ -55,7 +55,11 @@ def effective(db, provider):
     values, revision = read(db, provider)
     prefix = provider.upper() + '_'
     result = {prefix + field: values.get(field, os.getenv(prefix + field, '')) for field in FIELDS[provider] + ['TRANSPORT']}
-    result[prefix + 'TRANSPORT'] = result[prefix + 'TRANSPORT'] or 'webhook'
+    if not result[prefix + 'TRANSPORT']:
+        # A fresh installation should not need a public callback. Preserve the legacy default as soon as
+        # any existing provider field indicates that this is an older or partially configured deployment.
+        configured_field = any(result[prefix + field] for field in FIELDS[provider])
+        result[prefix + 'TRANSPORT'] = 'webhook' if configured_field else ('websocket' if provider == 'feishu' else 'stream')
     return result, revision
 
 

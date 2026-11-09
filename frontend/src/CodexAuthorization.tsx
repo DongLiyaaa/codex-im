@@ -3,10 +3,11 @@ import { api, errorText, post } from './api';
 import { Feedback } from './ui';
 import './CodexAuthorization.css';
 
-type Status = { mode?: 'api' | 'personal' | 'shared' | 'unavailable'; state: string; message: string; url?: string; user_code?: string; expires_at?: string; account?: { email?: string; planType?: string }; models?: { model: string; display_name: string; is_default: boolean }[]; selected_model?: string | null; models_loading?: boolean; model_error?: string | null };
+export type CodexAuthStatus = { mode?: 'api' | 'personal' | 'shared' | 'unavailable'; state: string; message: string; url?: string; user_code?: string; expires_at?: string; account?: { email?: string; planType?: string }; models?: { model: string; display_name: string; is_default: boolean }[]; selected_model?: string | null; models_loading?: boolean; model_error?: string | null };
+type Status = CodexAuthStatus;
 const pending = (state?: string) => state === 'starting' || state === 'pending';
 
-export function CodexAuthorization({ compact = false }: { compact?: boolean }) {
+export function CodexAuthorization({ compact = false, onStatus }: { compact?: boolean; onStatus?: (status: Status | null) => void }) {
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -16,6 +17,7 @@ export function CodexAuthorization({ compact = false }: { compact?: boolean }) {
   const [revision, setRevision] = useState(0);
   const lock = useRef(false);
   const epoch = useRef(0);
+  useEffect(() => { onStatus?.(status); }, [status, onStatus]);
   useEffect(() => {
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -55,6 +57,11 @@ export function CodexAuthorization({ compact = false }: { compact?: boolean }) {
     } catch (err) { setError(errorText(err)); }
     finally { lock.current = false; setBusy(false); }
   }
+  async function copyCode() {
+    if (!status?.user_code) return;
+    try { await navigator.clipboard.writeText(status.user_code); setCopied(true); }
+    catch { setCopied(false); setError('复制失败，请手动复制上方代码，再打开官方页面。'); }
+  }
   if (compact && status?.mode !== 'personal' && !error) return null;
   const official = status?.url === 'https://auth.openai.com/codex/device';
   return <section className="codex-authorization" aria-label="本人 ChatGPT 授权">
@@ -66,13 +73,11 @@ export function CodexAuthorization({ compact = false }: { compact?: boolean }) {
         : <p>{status?.message || '正在检查授权状态…'}</p>}
       {status?.state === 'connected' && <p>已连接{status.account?.email ? `：${status.account.email}` : ''}。仅用于你发起的任务，请重新发送任务。</p>}
       {pending(status?.state) && official && status?.user_code && <>
-        <p>仅供本人，请勿转发。请在官方页面登录并输入一次性代码；可能需要先在 ChatGPT 安全设置中开启设备登录。</p>
-        <p><code>{status.user_code}</code> <button type="button" className="secondary" onClick={async () => {
-          try { await navigator.clipboard.writeText(status.user_code!); setCopied(true); }
-          catch { setError('复制失败，请手动复制上方代码。'); }
-        }}>{copied ? '已复制' : '复制代码'}</button></p>
-        <a href={status.url} target="_blank" rel="noopener noreferrer">打开 ChatGPT 官方授权页面</a>
-        <p>短时有效，完成后自动更新状态。授权不保证账号拥有可用额度。</p>
+        <p>仅供本人，请勿转发。点击下面按钮会复制一次性代码并打开官方页面；可能需要先在 ChatGPT 安全设置中开启设备登录。</p>
+        <p><code>{status.user_code}</code></p>
+        <div className="actions"><a className="primary authorization-open" href={status.url} target="_blank" rel="noopener noreferrer" onClick={() => { void copyCode(); }}>复制代码并打开官方页面</a><button type="button" className="text-button" onClick={() => void copyCode()}>{copied ? '已复制' : '仅复制代码'}</button></div>
+        {copied && <p className="authorization-copy-state" role="status">代码已复制，请在官方页面粘贴。</p>}
+        <p>短时有效，完成后这里会自动更新。授权不保证账号拥有可用额度。</p>
       </>}
       {status?.mode === 'personal' && status.state === 'connected' && <div className="codex-model-picker">
         <label className="field"><span>当前模型</span><select aria-label="当前模型" value={model} disabled={busy || status.models_loading} onChange={e => setModel(e.target.value)}>

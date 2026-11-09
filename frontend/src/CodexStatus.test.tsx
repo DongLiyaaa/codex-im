@@ -28,10 +28,15 @@ it('shows every check as passed and the integration as usable', async () => {
   render(<CodexStatus/>);
   expect(await screen.findByText('可用')).toBeTruthy();
   for (const name of ['执行器连接', 'Codex CLI', '模型与端点', '模型凭据', '模型端点连通', '沙箱']) expect(within(rowOf(name)).getByText('通过')).toBeTruthy();
+  expect(within(rowOf('认证方式')).getByText('API 模式')).toBeTruthy();
+  expect(within(rowOf('认证方式')).getByText(/本机 Codex CLI 登录不会自动用于 Agent Hub/)).toBeTruthy();
   expect(within(rowOf('Codex CLI')).getByText('已安装 0.157.1。')).toBeTruthy();
   expect(within(rowOf('模型与端点')).getByText('模型 demo-model；端点 models.example.com。')).toBeTruthy();
   expect(within(rowOf('模型端点连通')).getByText('端点连通正常，模型列表包含 demo-model。')).toBeTruthy();
   expect(within(rowOf('模型凭据')).getByText('已配置 API Key（不会显示内容）。')).toBeTruthy();
+  expect(Array.from(screen.getByRole('list', { name: 'Codex CLI 检查项' }).querySelectorAll('.codex-check-name')).map(node => node.textContent)).toEqual([
+    '执行器连接', 'Codex CLI', '认证方式', '模型与端点', '模型凭据', '模型端点连通', '沙箱',
+  ]);
   expect(request).toHaveBeenCalledWith('/system/codex-status', expect.anything());
 });
 
@@ -86,7 +91,10 @@ it.each([
   render(<CodexStatus/>);
   expect(await screen.findByText(text)).toBeTruthy();
   expect(within(rowOf('执行器连接')).getByText('未通过')).toBeTruthy();
-  expect(screen.getAllByText('未检查')).toHaveLength(5);
+  expect(screen.getAllByText('未检查')).toHaveLength(3);
+  expect(screen.queryByText('模型与端点')).toBeNull();
+  expect(screen.queryByText('模型凭据')).toBeNull();
+  expect(screen.queryByText('模型端点连通')).toBeNull();
   expect(screen.getByText('不可用')).toBeTruthy();
 });
 
@@ -182,19 +190,14 @@ it.each(['99.0.0', null])('does not reject an unknown Claude version (%s)', asyn
   expect(screen.queryByText(/部署固定版本/)).toBeNull();
 });
 
-it('opens personal authorization beside the overview recheck button even in API mode', async () => {
-  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+it('does not show a redundant personal authorization entry in API mode', async () => {
   request.mockImplementation(async path => path.startsWith('/system/codex-status') ? result() : { mode: 'api', state: 'disconnected', message: '', account: {} });
   render(<CodexStatus/>);
   await screen.findByText('可用');
-  const button = screen.getByRole('button', { name: 'ChatGPT 授权' });
-  expect(within(button.parentElement!).getByRole('button', { name: '重新检查' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '重新检查' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'ChatGPT 授权' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '登录 ChatGPT 授权' })).toBeNull();
   expect(request.mock.calls.some(([path]) => path === '/auth/codex')).toBe(false);
-  fireEvent.click(button);
-  const dialog = await screen.findByRole('dialog');
-  expect(await within(dialog).findByText('当前使用系统配置的 API，无需个人授权。')).toBeTruthy();
-  fireEvent.click(within(dialog).getByRole('button', { name: '关闭弹窗' }));
-  expect(screen.queryByRole('dialog')).toBeNull();
 });
 
 it('hides API-only checks when personal OAuth is available', async () => {
@@ -205,13 +208,31 @@ it('hides API-only checks when personal OAuth is available', async () => {
   expect(screen.queryByText('模型端点连通')).toBeNull();
   expect(screen.queryByText('模型与端点')).toBeNull();
   expect(await screen.findByRole('button',{name:'登录 ChatGPT 授权'})).toBeTruthy();
+  expect(within(rowOf('ChatGPT 登录')).getByText('本人 OAuth')).toBeTruthy();
+  expect(await within(rowOf('ChatGPT 登录')).findByText(/尚未连接本人 ChatGPT/)).toBeTruthy();
   expect(within(rowOf('沙箱')).getByText('通过')).toBeTruthy();
+});
+
+it('shows the current user as logged in before hiding every API-only check', async () => {
+  request.mockImplementation(async path => path.startsWith('/system/codex-status')
+    ? result({ personal_auth_available: true, credential_source: 'personal', config_error: 'MODEL_API_KEY_NOT_CONFIGURED', model: { id: null, endpoint_host: null, credential_configured: false } })
+    : { mode: 'personal', state: 'connected', message: '本人 ChatGPT 已连接', account: { email: 'person@example.com' }, models: [] });
+  render(<CodexStatus/>);
+  await screen.findByText('ChatGPT 登录');
+  const row = rowOf('ChatGPT 登录');
+  expect(await within(row).findByText('通过')).toBeTruthy();
+  expect(within(row).getByText(/本人 ChatGPT 已登录：person@example.com/)).toBeTruthy();
+  expect(screen.queryByText('模型与端点')).toBeNull();
+  expect(screen.queryByText('模型凭据')).toBeNull();
+  expect(screen.queryByText('模型端点连通')).toBeNull();
 });
 
 it('shared ChatGPT authentication does not display API configuration failures', async () => {
   answer(result({auth_mode:'chatgpt',credential_source:'shared'}));
   render(<CodexStatus/>);
   await screen.findByText('共享 OAuth');
+  expect(within(rowOf('ChatGPT 登录')).getByText(/已识别部署的共享 ChatGPT 登录/)).toBeTruthy();
   expect(screen.queryByText('模型与端点')).toBeNull();
+  expect(screen.queryByText('模型凭据')).toBeNull();
   expect(screen.queryByText('模型端点连通')).toBeNull();
 });

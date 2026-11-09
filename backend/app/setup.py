@@ -24,7 +24,7 @@ def create_admin(db, body):
     if initialized(db):
         raise HTTPException(409, 'Setup already completed')
     user = User(email=body.email, name=body.name, password_hash=hash_password(body.password),
-                role='super_admin', active=True, onboarding={'status': 'pending', 'step': 'welcome', 'auto_start': True})
+                role='super_admin', active=True, onboarding={'status': 'pending', 'step': 'model', 'auto_start': True})
     db.add(user)
     state = db.get(SetupState, 'initial-admin')
     if state:

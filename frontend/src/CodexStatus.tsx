@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { CircleCheck, CircleMinus, CircleX, RefreshCw, KeyRound } from 'lucide-react';
+import { CircleCheck, CircleMinus, CircleX, RefreshCw } from 'lucide-react';
 import { dateText } from './api';
-import { Badge, Feedback, Loading, Modal, useData } from './ui';
+import { Badge, Feedback, Loading, useData } from './ui';
 import './CodexStatus.css';
 import { CodexAuthorization } from './CodexAuthorization';
+import type { CodexAuthStatus } from './CodexAuthorization';
 
 export interface CodexRunnerStatus {
   personal_auth_available?: boolean;
@@ -66,12 +67,11 @@ const claudeConfigErrors: Record<string, string> = {
 const toneBadge: Record<Tone, { text: string; badge: string }> = { ok: { text: '通过', badge: 'green' }, fail: { text: '未通过', badge: 'red' }, idle: { text: '未检查', badge: '' } };
 const Icon = { ok: CircleCheck, fail: CircleX, idle: CircleMinus };
 
-export function codexRows(result: CodexStatusResult): Row[] {
-  const names = ['执行器连接', 'Codex CLI', '模型与端点', '模型凭据', '模型端点连通', '沙箱'];
+export function codexRows(result: CodexStatusResult, authorization: CodexAuthStatus | null = null): Row[] {
   const runner = result.runner;
   if (!result.reachable || !runner) {
     const code = result.error ?? '';
-    return names.map((name, i) => i === 0
+    return ['执行器连接', 'Codex CLI', '登录与认证', '沙箱'].map((name, i) => i === 0
       ? { name, tone: 'fail', detail: runnerErrors[code] ?? `执行器检查失败（${code || '未知原因'}）。` }
       : { name, tone: 'idle', detail: '执行器不可用，未检查。' });
   }
@@ -79,39 +79,57 @@ export function codexRows(result: CodexStatusResult): Row[] {
   const error = runner.config_error ?? '';
   const modelBad = error in modelConfigErrors;
   const credentialBad = !!error && !modelBad;
-  const rows: Row[] = [{ name: names[0], tone: 'ok', detail: '已连接执行器。' }];
+  const rows: Row[] = [{ name: '执行器连接', tone: 'ok', detail: '已连接执行器。' }];
   rows.push(codex.installed
-    ? { name: names[1], tone: 'ok', detail: codex.version ? `已安装 ${codex.version}。` : '已安装，但无法读取版本。' }
-    : { name: names[1], tone: 'fail', detail: '执行器里没有找到 Codex CLI。' });
-  const apiMode = runner.credential_source === 'api' || (!runner.personal_auth_available && runner.auth_mode !== 'chatgpt' && runner.credential_source !== 'personal' && runner.credential_source !== 'shared');
-  if (apiMode) {
-  rows.push(modelBad
-    ? { name: names[2], tone: 'fail', detail: modelConfigErrors[error] }
-    : { name: names[2], tone: 'ok', detail: `${model.id ? `模型 ${model.id}` : '未指定模型，使用 Codex 默认模型'}；${model.endpoint_host ? `端点 ${model.endpoint_host}` : '默认端点'}。` });
-  rows.push(runner.personal_auth_available
-    ? { name: names[3], tone: 'idle', detail: '支持个人 ChatGPT 授权；请使用此处授权入口连接本人账号。' }
-    : credentialBad
-    ? { name: names[3], tone: 'fail', detail: credentialErrors[error] ?? `模型凭据不可用（${error}）。` }
-    : !model.credential_configured
-      ? { name: names[3], tone: 'fail', detail: '没有配置模型凭据。' }
-      : { name: names[3], tone: 'ok', detail: runner.auth_mode === 'chatgpt' ? '使用 ChatGPT 登录。' : '已配置 API Key（不会显示内容）。' });
-  if (endpoint.state === 'ok') {
-    rows.push({ name: names[4], tone: 'ok', detail: model.id ? `端点连通正常，模型列表包含 ${model.id}。` : '端点连通正常。' });
-  } else if (endpoint.state === 'unverified') {
-    rows.push({ name: names[4], tone: 'idle', detail: `端点没有提供模型列表${endpoint.http_status ? `（HTTP ${endpoint.http_status}）` : ''}，无法验证，不影响判断。` });
-  } else if (endpoint.state === 'skipped') {
-    rows.push({ name: names[4], tone: 'idle', detail: skipReasons[endpoint.reason ?? ''] ?? '未检查。' });
+    ? { name: 'Codex CLI', tone: 'ok', detail: codex.version ? `已安装 ${codex.version}。` : '已安装，但无法读取版本。' }
+    : { name: 'Codex CLI', tone: 'fail', detail: '执行器里没有找到 Codex CLI。' });
+  const personal = runner.credential_source === 'personal' || runner.personal_auth_available;
+  const shared = !personal && runner.auth_mode === 'chatgpt';
+  if (personal) {
+    const connected = authorization?.state === 'connected';
+    rows.push({
+      name: 'ChatGPT 登录',
+      tone: connected ? 'ok' : 'idle',
+      badge: connected ? undefined : '本人 OAuth',
+      detail: connected
+        ? `本人 ChatGPT 已登录${authorization?.account?.email ? `：${authorization.account.email}` : ''}，无需 API Key 或模型端点。`
+        : `${authorization?.message || '正在读取本人 ChatGPT 登录状态'}；登录后无需 API Key 或模型端点。`,
+    });
+  } else if (shared) {
+    rows.push({
+      name: 'ChatGPT 登录', tone: runner.config_error ? 'fail' : 'ok', badge: '共享 OAuth',
+      detail: runner.config_error
+        ? `部署的共享 ChatGPT 登录不可用（${runner.config_error}）。`
+        : '已识别部署的共享 ChatGPT 登录，无需 API Key 或模型端点。',
+    });
   } else {
-    rows.push({ name: names[4], tone: 'fail', detail: `${endpointFailures[endpoint.state] ?? '端点检查失败。'}${endpoint.http_status ? `（HTTP ${endpoint.http_status}）` : ''}` });
-  }
-  } else {
-    rows.push({ name: '登录方式', tone: 'idle', badge: runner.personal_auth_available ? '个人 OAuth' : '共享 OAuth', detail: runner.personal_auth_available ? '使用本人 ChatGPT 登录，不需要配置 API Key 或模型端点。' : '使用部署明确配置的共享 ChatGPT 登录。' });
+    rows.push({
+      name: '认证方式', tone: 'idle', badge: 'API 模式',
+      detail: '当前使用系统 API 配置，不是 ChatGPT 登录；本机 Codex CLI 登录不会自动用于 Agent Hub。',
+    });
+    rows.push(modelBad
+      ? { name: '模型与端点', tone: 'fail', detail: modelConfigErrors[error] }
+      : { name: '模型与端点', tone: 'ok', detail: `${model.id ? `模型 ${model.id}` : '未指定模型，使用 Codex 默认模型'}；${model.endpoint_host ? `端点 ${model.endpoint_host}` : '默认端点'}。` });
+    rows.push(credentialBad
+      ? { name: '模型凭据', tone: 'fail', detail: credentialErrors[error] ?? `模型凭据不可用（${error}）。` }
+      : !model.credential_configured
+        ? { name: '模型凭据', tone: 'fail', detail: '没有配置模型凭据。' }
+        : { name: '模型凭据', tone: 'ok', detail: '已配置 API Key（不会显示内容）。' });
+    if (endpoint.state === 'ok') {
+      rows.push({ name: '模型端点连通', tone: 'ok', detail: model.id ? `端点连通正常，模型列表包含 ${model.id}。` : '端点连通正常。' });
+    } else if (endpoint.state === 'unverified') {
+      rows.push({ name: '模型端点连通', tone: 'idle', detail: `端点没有提供模型列表${endpoint.http_status ? `（HTTP ${endpoint.http_status}）` : ''}，无法验证，不影响判断。` });
+    } else if (endpoint.state === 'skipped') {
+      rows.push({ name: '模型端点连通', tone: 'idle', detail: skipReasons[endpoint.reason ?? ''] ?? '未检查。' });
+    } else {
+      rows.push({ name: '模型端点连通', tone: 'fail', detail: `${endpointFailures[endpoint.state] ?? '端点检查失败。'}${endpoint.http_status ? `（HTTP ${endpoint.http_status}）` : ''}` });
+    }
   }
   rows.push(sandbox.state === 'ok'
-    ? { name: names[5], tone: 'ok', detail: '沙箱可以启动，任务能在其中安全执行。' }
+    ? { name: '沙箱', tone: 'ok', detail: '沙箱可以启动，任务能在其中安全执行。' }
     : sandbox.state === 'failed'
-      ? { name: names[5], tone: 'fail', detail: '沙箱无法启动，任务会被拒绝。Apple Silicon 上的 amd64 容器是常见原因，详见 docs/DOCKER_IMPACT.md。' }
-      : { name: names[5], tone: 'idle', detail: '当前平台使用系统沙箱，在运行任务时检查。' });
+      ? { name: '沙箱', tone: 'fail', detail: '沙箱无法启动，任务会被拒绝。Apple Silicon 上的 amd64 容器是常见原因，详见 docs/DOCKER_IMPACT.md。' }
+      : { name: '沙箱', tone: 'idle', detail: '当前平台使用系统沙箱，在运行任务时检查。' });
   return rows;
 }
 
@@ -152,7 +170,7 @@ function Checks({ label, rows }: { label: string; rows: Row[] }) {
 
 export function CodexStatus() {
   const [forced, setForced] = useState(false);
-  const [authorizationOpen, setAuthorizationOpen] = useState(false);
+  const [authorization, setAuthorization] = useState<CodexAuthStatus | null>(null);
   const { data, error, loading, reload } = useData<CodexStatusResult>(forced ? '/system/codex-status?refresh=true' : '/system/codex-status');
   const valid = !!data && typeof data === 'object' && !Array.isArray(data) && typeof data.reachable === 'boolean';
   const ready = valid && data.reachable && data.runner?.ready === true;
@@ -163,14 +181,13 @@ export function CodexStatus() {
       <h2 id="codex-check-title">Codex CLI 接入检查</h2>
       <div className="codex-check-actions">
         {valid && <Badge tone={ready ? 'green' : 'red'}>{ready ? (data.runner?.personal_auth_available ? '执行器就绪' : '可用') : '不可用'}</Badge>}
-        <button type="button" className="text-button" onClick={() => setAuthorizationOpen(true)}><KeyRound size={15}/>ChatGPT 授权</button>
         <button className="text-button" onClick={recheck} disabled={loading}><RefreshCw size={15}/>重新检查</button>
       </div>
     </div>
     <Feedback error={error || (data && !valid ? '检查结果的格式无法识别。' : '')}/>
     {loading ? <Loading/> : valid && <>
-      <Checks label="Codex CLI 检查项" rows={codexRows(data)}/>
-      {data.runner?.personal_auth_available && <CodexAuthorization/>}
+      <Checks label="Codex CLI 检查项" rows={codexRows(data, authorization)}/>
+      {data.runner?.personal_auth_available && <CodexAuthorization onStatus={setAuthorization}/>}
       {data.runner && !data.runner.agents?.claude?.enabled && <>
         <div className="section-heading"><h2>Claude CLI 接入检查</h2><Badge>未启用</Badge></div>
         <Checks label="Claude CLI 检查项" rows={[claudeDisabledRow]}/>
@@ -181,6 +198,5 @@ export function CodexStatus() {
       </>}
       {data.runner && <div className="codex-check-foot">上次检查：{dateText(new Date(data.runner.checked_at * 1000).toISOString())}。结果缓存约 30 秒。</div>}
     </>}
-    {authorizationOpen && <Modal title="本人 ChatGPT 授权" close={() => setAuthorizationOpen(false)}><CodexAuthorization/></Modal>}
   </section>;
 }

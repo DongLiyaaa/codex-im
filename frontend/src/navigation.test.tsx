@@ -43,9 +43,10 @@ it('restores the page and selected conversation after reload', async () => {
 it('offers personal management without a selected conversation or historical card', async () => {
   window.history.replaceState(null,'','#/chat'); render(<App/>);
   fireEvent.click(await screen.findByRole('button',{name:'本人平台授权'}));
-  expect(screen.getAllByRole('button',{name:'查看本人授权状态'})).toHaveLength(2);
+  expect(screen.getAllByText(/个人授权 ·/)).toHaveLength(2);
   expect(screen.getByText(/仅管理当前登录账号/)).toBeTruthy();
-  expect(request.mock.calls.some(([p])=>p==='/platform-connections')).toBe(false);
+  await waitFor(()=>expect(request.mock.calls.filter(([p])=>p==='/platform-connections')).toHaveLength(2));
+  expect(screen.queryByRole('button',{name:'查看本人授权状态'})).toBeNull();
 });
 it('preserves management page and rejects member audit route', async () => {
   window.history.replaceState(null,'','#/resources'); const view=render(<App/>);
@@ -168,10 +169,10 @@ it('puts initialization first and gives the manual its own route without treatin
 });
 
 it('automatically opens first-admin onboarding once per authentication and does not trap navigation', async () => {
-  const first = { ...user, id: 'first', role: 'super_admin', org_id: null, team_id: null, onboarding: { status: 'pending', step: 'welcome', auto_start: true } };
-  request.mockImplementation(async (path: string, options?: RequestInit) => path === '/setup/status' ? true : path === '/auth/me' ? first : path === '/auth/me/onboarding' ? { ...first, onboarding: { ...JSON.parse(String(options?.body)), auto_start: true } } : path === '/overview' ? {} : []);
+  const first = { ...user, id: 'first', role: 'super_admin', org_id: null, team_id: null, onboarding: { status: 'pending', step: 'model', auto_start: true } };
+  request.mockImplementation(async (path: string, options?: RequestInit) => path === '/setup/status' ? true : path === '/auth/me' ? first : path === '/auth/me/onboarding' ? { ...first, onboarding: { ...JSON.parse(String(options?.body)), auto_start: true } } : path === '/overview' ? {} : path === '/auth/codex' ? { mode: 'personal', state: 'disconnected', message: '尚未连接本人 ChatGPT' } : []);
   window.history.replaceState(null, '', '#/resources'); render(<App/>);
-  await screen.findByRole('heading', { name: '初始化引导' });
+  await screen.findByRole('heading', { name: '快速初始化' });
   expect(window.location.hash).toBe('#/onboarding');
   await waitFor(() => expect(request.mock.calls.filter(([path]) => path === '/auth/me/onboarding')).toHaveLength(1));
   fireEvent.click(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('button', { name: '使用说明' }));

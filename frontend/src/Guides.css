@@ -25,5 +25,19 @@
 .manual-article dt { font-weight: 600; margin: 16px 0 6px; }
 .manual-article dd { margin: 0; color: var(--text-2); line-height: 1.75; overflow-wrap: anywhere; }
 .manual-article:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
-@media (max-width: 800px) { .guide-layout { grid-template-columns: 1fr; gap: 16px; } .guide-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 10px; } .guide-article { padding: 20px; } }
+.guide-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 24px 0; }
+.guide-choice { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; min-height: 190px; padding: 22px; text-align: left; white-space: normal; background: var(--surface-raised, var(--surface)); color: var(--text); border: 1px solid var(--line); box-shadow: none; }
+.guide-choice:hover { border-color: var(--brand); transform: translateY(-1px); }
+.guide-choice > svg { color: var(--brand-text); }
+.guide-choice strong { font-size: var(--fs-headline); }
+.guide-choice > span { color: var(--text-2); line-height: 1.6; }
+.guide-choice .guide-choice-action { display: inline-flex; align-items: center; gap: 6px; margin-top: auto; color: var(--brand-text); font-weight: 600; }
+.guide-model-status { margin: 24px 0; padding: 18px; border-radius: var(--radius-sm); background: var(--fill); }
+.guide-model-status p { margin: 8px 0 0; }
+.guide-more { margin-top: 24px; }
+.guide-more summary { cursor: pointer; color: var(--brand-text); font-weight: 600; }
+.guide-more .guide-links { margin-bottom: 0; }
+.guide-article .codex-authorization { margin: 22px 0; padding: 0; border: 0; }
+@media (max-width: 800px) { .guide-layout { grid-template-columns: 1fr; gap: 16px; } .guide-steps { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 10px; } .guide-article { padding: 20px; } }
+@media (max-width: 560px) { .guide-choice-grid { grid-template-columns: 1fr; } .guide-choice { min-height: 0; } }
 @media (max-width: 420px) { .guide-steps { grid-template-columns: 1fr; } .guide-links button { width: 100%; } .guide-footer { gap: 8px; } }

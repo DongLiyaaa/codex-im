@@ -49,7 +49,7 @@ def test_first_registration_concurrency_and_tombstone(database):
     with database.begin() as db:
         user = db.scalar(select(User))
         assert user.role == 'super_admin' and user.active and user.org_id is None
-        assert user.onboarding == {'status': 'pending', 'step': 'welcome', 'auto_start': True}
+        assert user.onboarding == {'status': 'pending', 'step': 'model', 'auto_start': True}
         assert security.verify_password(BODY['password'], user.password_hash)
         assert db.scalar(select(func.count()).select_from(User)) == 1
         db.execute(delete(User))
@@ -91,10 +91,13 @@ def test_http_validation_origin_login_and_rate_limit(database, monkeypatch):
             assert BODY['password'] not in r.text and 'short' not in r.text
         assert c.post('/api/setup/bootstrap', json=BODY, headers={'Origin': 'https://foreign.invalid'}).status_code == 403
         r = c.post('/api/setup/bootstrap', json=BODY)
-        assert r.status_code == 201 and r.json() == {'ok': True}
-        assert 'set-cookie' not in r.headers
+        assert r.status_code == 201 and r.json()['email'] == BODY['email']
+        assert r.json()['onboarding'] == {'status': 'pending', 'step': 'model', 'auto_start': True}
+        assert 'password' not in r.text and 'hub_session=' in r.headers['set-cookie']
+        assert c.get('/api/auth/me').json()['email'] == BODY['email']
         assert c.get('/api/setup/status').json() is True
         assert c.post('/api/setup/bootstrap', json=BODY).status_code == 409
+        assert c.post('/api/auth/logout').status_code == 200
         assert c.post('/api/auth/login', json={'email': BODY['email'], 'password': BODY['password']}).status_code == 200
         for _ in range(10): r = c.post('/api/setup/bootstrap', json=BODY)
         assert r.status_code == 429
@@ -127,7 +130,7 @@ def test_existing_instance_ignores_bootstrap_and_empty_env_starts(database, monk
     with database.begin() as db:
         assert setup.initialized(db)
         assert db.scalar(select(User)).email == 'owner@example.invalid'
-        assert db.scalar(select(User)).onboarding == {'status': 'pending', 'step': 'welcome', 'auto_start': True}
+        assert db.scalar(select(User)).onboarding == {'status': 'pending', 'step': 'model', 'auto_start': True}
 
 
 def test_onboarding_migration_is_additive_and_repeatable(database):

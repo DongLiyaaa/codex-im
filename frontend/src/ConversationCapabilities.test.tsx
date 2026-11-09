@@ -16,6 +16,28 @@ it('requires explicit group selection, writes one side and refreshes effective c
  await waitFor(() => expect(changed).toHaveBeenCalledOnce());
  expect(request).toHaveBeenCalledWith('/bindings', { subject_type: 'group', subject_id: 'g', resource_id: 'r' });
 });
+it('uses the conversation owner when a read-only supervisor manages a group conversation', async () => {
+ render(<ConversationCapabilities conversation={conversation} user={user} subjectUserId="owner" kind="skill" close={vi.fn()} changed={vi.fn()}/>);
+ await screen.findByRole('option', { name: '测试技能' });
+ expect(screen.getByRole('option', { name: '会话所属用户' })).toBeTruthy();
+ fireEvent.change(screen.getByLabelText('选择 Skill'), { target: { value: 'r' } });
+ fireEvent.click(screen.getByText('添加授权'));
+ await waitFor(() => expect(request).toHaveBeenCalledWith('/bindings', { subject_type: 'user', subject_id: 'owner', resource_id: 'r' }));
+});
+it('revokes a direct authorization after confirmation and refreshes effective capabilities', async () => {
+ const changed = vi.fn();
+ request.mockImplementation(async (p, options) => {
+  if (p === '/resources') return [{ id: 'r', name: '测试技能', kind: 'skill', enabled: true, can_manage: true }];
+  if (p === '/bindings/b') { expect(options).toEqual({ method: 'DELETE' }); return {}; }
+  if (p === '/bindings') return [{ id: 'b', subject_type: 'user', subject_id: 'owner', resource_id: 'r', can_manage: true }];
+  return [];
+ });
+ render(<ConversationCapabilities conversation={{...conversation, group_id: null}} user={user} kind="skill" close={vi.fn()} changed={changed}/>);
+ fireEvent.click(await screen.findByRole('button', { name: '撤销' }));
+ fireEvent.click(screen.getByRole('button', { name: '确认撤销' }));
+ await waitFor(() => expect(changed).toHaveBeenCalledOnce());
+ expect(request).toHaveBeenCalledWith('/bindings/b', { method: 'DELETE' });
+});
 it('retains the selected resource on failure and protects unsaved close', async () => {
  render(<ConversationCapabilities conversation={{...conversation, group_id: null}} user={user} kind="skill" close={vi.fn()} changed={vi.fn()}/>);
  await screen.findByRole('option', { name: '测试技能' });

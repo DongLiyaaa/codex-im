@@ -29,6 +29,7 @@ def test_default_target_gets_independent_random_secrets_and_private_permissions(
     assert all(len(value) == 48 and value.isalnum() for value in secrets_) and len(set(secrets_)) == len(secrets_)
     assert stat.S_IMODE((root / '.env').stat().st_mode) == 0o600
     assert data['HUB_PORT'] == '18200' and data['APP_ORIGIN'] == 'http://127.0.0.1:18200'
+    assert data['FEISHU_TRANSPORT'] == data['DINGTALK_TRANSPORT'] == ''
     assert not any('replace_with' in value for value in data.values())
 
 

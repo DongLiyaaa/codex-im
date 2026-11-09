@@ -55,6 +55,7 @@ export function IntegrationWorkspace({ user, identities, users, loading, error, 
         {notice && <p role="status" className="notice">{notice}</p>}
         {/* Keep visited forms mounted so platform/section switching never discards a draft. */}
         {visited.map(key => { const [p, s] = key.split(':') as [Provider, Section]; return <div key={key} hidden={provider !== p || section !== s}>{admin && renderPanel(s, p)}</div>; })}
+        {admin && section === 'connection' && <div className="actions integration-next"><button type="button" className="primary" onClick={() => select(provider, 'members')}>下一步：接入员工</button><button type="button" className="text-button" onClick={() => select(provider, 'oauth')}>需要本人文档权限？配置个人授权</button></div>}
         {section === 'overview' && <>
           <p className="notice">配置已保存、连接已建立、消息收发成功是不同状态。请按下面步骤逐项验证。</p>
           <div className="integration-steps">{[

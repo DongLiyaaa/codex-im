@@ -67,23 +67,39 @@ AVATAR_MAX_CHARS = 100_000
 AVATAR_SIGNATURES = (b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff', b'RIFF')
 
 
-OnboardingStep = Literal['welcome', 'model', 'people', 'resources', 'permissions', 'try']
+OnboardingStep = Literal['model', 'usage', 'try']
+ONBOARDING_STEP_ALIASES = {
+    'welcome': 'model', 'model': 'model',
+    'people': 'usage', 'resources': 'usage', 'permissions': 'usage', 'usage': 'usage',
+    'try': 'try',
+}
 
 
-class OnboardingProgress(Input):
+def normalize_onboarding_step(value):
+    return ONBOARDING_STEP_ALIASES.get(value, value)
+
+
+class OnboardingFields(Input):
+    @field_validator('step', mode='before', check_fields=False)
+    @classmethod
+    def legacy_step(cls, value):
+        return normalize_onboarding_step(value)
+
+
+class OnboardingProgress(OnboardingFields):
     status: Literal['pending', 'in_progress', 'deferred', 'completed']
     step: OnboardingStep
     auto_start: bool = False
 
 
-class OnboardingUpdate(Input):
+class OnboardingUpdate(OnboardingFields):
     status: Literal['in_progress', 'deferred', 'completed']
     step: OnboardingStep
 
     @model_validator(mode='after')
     def completed_step(self):
         if self.status == 'completed' and self.step != 'try':
-            raise ValueError('请在最后一步完成阅读。')
+            raise ValueError('请在最后一步完成初始化。')
         return self
 
 

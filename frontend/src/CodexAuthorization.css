@@ -3,6 +3,8 @@
 .codex-authorization p { line-height: 1.6; overflow-wrap: anywhere; }
 .codex-authorization .actions { flex-wrap: wrap; margin: 12px 0; }
 .codex-authorization code { font-size: 18px; letter-spacing: .08em; user-select: all; }
+.codex-authorization .authorization-open { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+.codex-authorization .authorization-copy-state { color: var(--text-3); font-size: var(--fs-footnote); }
 .codex-authorization small { display: block; color: var(--text-3); line-height: 1.5; }
 .codex-model-picker { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 20px; }
 .codex-model-picker select { width: 100%; max-width: 480px; }

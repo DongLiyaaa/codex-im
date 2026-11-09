@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { api, post, sameId } from './api';
-import type { Binding, Conversation, Resource, User } from './api';
+import type { Binding, Conversation, ID, Resource, User } from './api';
 import { Empty, Feedback, Field, Form, Loading, Modal, useData } from './ui';
 import { SearchableSelect } from './SearchableSelect';
 
-export function ConversationCapabilities({ conversation, user, kind, close, changed }: {
-  conversation: Conversation; user: User; kind: 'skill' | 'mcp'; close: () => void; changed: () => void;
+export function ConversationCapabilities({ conversation, user, subjectUserId, kind, close, changed }: {
+  conversation: Conversation; user: User; subjectUserId?: ID; kind: 'skill' | 'mcp'; close: () => void; changed: () => void;
 }) {
   const resources = useData<Resource[]>('/resources', 0, true);
   const bindings = useData<Binding[]>('/bindings', 0, true);
@@ -15,18 +15,18 @@ export function ConversationCapabilities({ conversation, user, kind, close, chan
   const [remove, setRemove] = useState<Binding | null>(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const subjectId = target === 'group' ? conversation.group_id! : conversation.group_id != null ? user.id : conversation.owner_id;
+  const subjectId = target === 'group' ? conversation.group_id! : subjectUserId ?? (conversation.group_id != null ? user.id : conversation.owner_id);
   const direct = (bindings.data ?? []).filter(b => b.subject_type === target && sameId(b.subject_id, subjectId) && resources.data?.some(r => sameId(r.id, b.resource_id) && r.kind === kind));
   const options = (resources.data ?? []).filter(r => r.kind === kind && r.enabled && r.can_manage && !direct.some(b => sameId(b.resource_id, r.id)));
   const loading = resources.loading || bindings.loading;
   const loadError = resources.error || bindings.error;
-  const title = kind === 'skill' ? '设置 Skills 技能' : '设置 MCP 服务';
+  const title = kind === 'skill' ? '管理 Skills 授权' : '管理 MCP 授权';
   function refresh() { bindings.reload(); changed(); }
   return <Modal title={title} dirty={!!resource} busy={busy} close={close}>
     <div className="conversation-capability-settings">
       <p>为「{conversation.title}」配置授权。此处修改的是用户或群组授权，会影响该对象的其他会话，并非仅本次会话。</p>
       {conversation.group_id != null && <p className="notice">群聊只使用当前用户与群组共同获授权的能力；需要分别核对两侧。组织或部门继承的授权在「绑定与授权」管理。</p>}
-      <Field label="授权对象"><select value={target} disabled={busy} onChange={e => { setTarget(e.target.value as 'user' | 'group'); setResource(''); setRemove(null); setError(''); setNotice(''); }}><option value="user">{conversation.group_id != null ? '当前用户' : '会话所属用户'}</option>{conversation.group_id != null && <option value="group">当前群组</option>}</select></Field>
+      <Field label="授权对象"><select value={target} disabled={busy} onChange={e => { setTarget(e.target.value as 'user' | 'group'); setResource(''); setRemove(null); setError(''); setNotice(''); }}><option value="user">{conversation.group_id != null ? sameId(subjectId, user.id) ? '当前用户' : '会话所属用户' : '会话所属用户'}</option>{conversation.group_id != null && <option value="group">当前群组</option>}</select></Field>
       <Feedback error={loadError || error} success={notice}/>
       {loadError && <button className="secondary" onClick={() => { resources.reload(); bindings.reload(); }}>重试加载授权</button>}
       {loading && <Loading/>}

@@ -1,6 +1,6 @@
 export type ID = string | number;
 export type Role = 'super_admin' | 'org_admin' | 'team_lead' | 'member';
-export type OnboardingStep = 'welcome' | 'model' | 'people' | 'resources' | 'permissions' | 'try';
+export type OnboardingStep = 'model' | 'usage' | 'try';
 export interface OnboardingProgress { status: 'pending' | 'in_progress' | 'deferred' | 'completed'; step: OnboardingStep; auto_start?: boolean }
 export interface User { onboarding?: OnboardingProgress | null; id: ID; email: string; name: string; avatar?: string | null; role: Role; org_id: ID | null; team_id: ID | null; active: boolean; login_enabled?: boolean; can_manage?: boolean; im_channels?: string[] }
 export interface Group { can_edit?: boolean; can_delete?: boolean; org_name?: string | null; team_name?: string | null; id: ID; name: string; org_id: ID | null; team_id: ID | null; member_ids: ID[]; provider: string; external_id?: string | null }

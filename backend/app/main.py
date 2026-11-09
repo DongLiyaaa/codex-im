@@ -123,13 +123,27 @@ def setup_status(db=Depends(get_db, scope='function')):
     return initialized(db)
 
 
-@app.post('/api/setup/bootstrap', status_code=201)
-def setup_bootstrap(body: schemas.SetupAdmin, request: Request, db=Depends(get_db, scope='function')):
+def establish_session(db, user, request, response):
+    old = request.cookies.get('hub_session')
+    if old:
+        previous = db.get(SessionToken, token_hash(old))
+        if previous:
+            db.delete(previous)
+    token = secrets.token_urlsafe(48)
+    db.add(SessionToken(token_hash=token_hash(token), user_id=user.id, expires_at=now() + timedelta(hours=12)))
+    service.audit(db, user, 'auth.login', user.id)
+    response.set_cookie('hub_session', token, httponly=True, samesite='strict',
+                        secure=os.getenv('APP_ORIGIN', '').startswith('https://'), max_age=43200, path='/')
+
+
+@app.post('/api/setup/bootstrap', response_model=schemas.UserOut, status_code=201)
+def setup_bootstrap(body: schemas.SetupAdmin, request: Request, response: Response, db=Depends(get_db, scope='function')):
     from .setup import create_admin
     rate_limit('setup:' + (request.client.host if request.client else 'unknown'))
-    create_admin(db, body)
+    user = create_admin(db, body)
+    establish_session(db, user, request, response)
     db.commit()
-    return {'ok': True}
+    return user
 
 
 @app.post('/api/auth/login', response_model=schemas.UserOut)
@@ -139,15 +153,7 @@ def login(body: schemas.Login, request: Request, response: Response, db=Depends(
     encoded = user.password_hash if user else hash_password('dummy-password')
     if not verify_password(body.password, encoded) or not user or not user.active:
         raise HTTPException(401, 'Invalid credentials')
-    old = request.cookies.get('hub_session')
-    if old:
-        previous = db.get(SessionToken, token_hash(old))
-        if previous:
-            db.delete(previous)
-    token = secrets.token_urlsafe(48)
-    db.add(SessionToken(token_hash=token_hash(token), user_id=user.id, expires_at=now() + timedelta(hours=12)))
-    service.audit(db, user, 'auth.login', user.id)
-    response.set_cookie('hub_session', token, httponly=True, samesite='strict', secure=os.getenv('APP_ORIGIN', '').startswith('https://'), max_age=43200, path='/')
+    establish_session(db, user, request, response)
     return user
 
 
@@ -606,7 +612,10 @@ def run_status(identifier: str, actor=Depends(current_user), db=Depends(get_db, 
 def capabilities(identifier: str, actor=Depends(current_user), db=Depends(get_db, scope='function')):
     conversation = read_conversation(db, actor, identifier)
     result = {'skills': [], 'mcps': []}
-    for resource in policy.effective_resources(db, actor, conversation):
+    subject = actor if policy.can_send_conversation(db, actor, conversation) else db.get(User, conversation.owner_id)
+    if not subject:
+        return result
+    for resource in policy.effective_resources(db, subject, conversation):
         result['skills' if resource.kind == 'skill' else 'mcps'].append(service.resource_out(resource, actor))
     return result
 

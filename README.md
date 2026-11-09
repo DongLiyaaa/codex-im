@@ -24,11 +24,11 @@
 ```bash
 git clone https://github.com/DongLiyaaa/codex-im.git && cd codex-im
 python3 scripts/init_env.py            # 生成随机密钥到 .env，已有文件不会被覆盖
-# 打开 .env，填上 OPENAI_API_KEY（以及 CODEX_BASE_URL / CODEX_MODEL，如果你用的是第三方接口）
+# 模型 API Key 可以留空，启动后在初始化页连接本人 ChatGPT
 docker compose --env-file .env -f deploy/compose.ghcr.yaml up -d
 ```
 
-然后在本机浏览器打开 http://127.0.0.1:18200，**第一个注册的账号就是超级管理员**，请在对外开放之前自己先完成注册。
+然后在本机浏览器打开 http://127.0.0.1:18200，**第一个注册的账号就是超级管理员**，请在对外开放之前自己先完成注册。创建成功后会直接登录并进入三步初始化：连接模型、选择使用方式、开始对话；没有 API Key 时可使用本人 ChatGPT 设备授权。API Key、自定义端点等高级部署方式见下文。
 
 镜像是公开的，不需要登录就能直接拉取。
 
@@ -126,7 +126,7 @@ docker compose --env-file .env -f deploy/compose.ghcr.yaml up -d
 
 协议来源：[飞书设备流 v1.0.96](https://github.com/larksuite/cli/blob/v1.0.96/internal/auth/device_flow.go)、[飞书端点](https://github.com/larksuite/cli/blob/v1.0.96/internal/auth/paths.go)、[钉钉设备流 v1.0.62](https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/blob/v1.0.62/internal/auth/device_flow.go)、[钉钉 OAuth 交换与组织检查](https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/blob/v1.0.62/internal/auth/oauth_helpers.go)。采用直接协议适配，运行时不启动平台 CLI，不依赖主机 HOME/XDG/Keychain，不安装主机工具、不读取管理员既有登录态。
 
-服务配置（不自动混用机器人凭据）：超级管理员在「IM 集成」的个人 OAuth 配置中可独立填写，或点击「使用当前机器人应用（管理员确认）」并二次确认。服务端复制加密快照，不向前端返回密钥；检查 OAuth revision、机器人 revision 及快照指纹，拒绝掩码和过时配置。复制不代表设备授权能力已开通。机器人变更不自动同步；旧快照停用，需重新确认。钉钉 legacy webhook 只有群机器人密钥，不能复用为应用，必须配置 Stream AppKey/AppSecret。保留空白保留与明确清除规则；OAuth 与本人绑定身份必须属于同一应用。
+服务配置（不自动混用机器人凭据）：超级管理员在「IM 集成」的个人文档授权中可展开高级选项独立填写，或点击「使用机器人应用，免重复填写」并二次确认。服务端复制加密快照，不向前端返回密钥；检查 OAuth revision、机器人 revision 及快照指纹，拒绝掩码和过时配置。复制不代表设备授权能力已开通。机器人变更不自动同步；旧快照停用，需重新确认。钉钉 legacy webhook 只有群机器人密钥，不能复用为应用，必须配置 Stream AppKey/AppSecret。保留空白保留与明确清除规则；OAuth 与本人绑定身份必须属于同一应用。
 
 ### 管理员在飞书/钉钉对话内触发平台应用配置
 
@@ -182,7 +182,7 @@ worker以PG advisory lock保证本地唯一实例，周期清理过期未发送�
 ```bash
 # 端口按需选择（本机已有服务占用 18200 时用别的端口）；生成独立随机密钥，文件权限 0600，已存在则拒绝覆盖
 python3 scripts/init_env.py .env.docker 18210
-# 根据部署环境填写 .env.docker 中的模型凭据；IM 凭据可以留空，在网页里配置并加密保存到 PG
+# 模型凭据可留空后在初始化页做本人 ChatGPT 授权；IM 凭据也可在网页里配置并加密保存到 PG
 docker compose --env-file .env.docker config --quiet
 docker compose --env-file .env.docker up -d --build db api attachments runner
 ```
@@ -192,7 +192,7 @@ Compose 栈由自带的 `db`（PostgreSQL 16）、`api`、`attachments`（附件
 几个容易踩的点：
 
 - **runner 就绪需要同时满足两件事，`/health` 如实反映**：模型凭据（`OPENAI_API_KEY`，或下文的 ChatGPT OAuth 目录），以及 Codex 沙箱能真正启动。没有凭据是 `MODEL_API_KEY_NOT_CONFIGURED`，沙箱起不来是 `SANDBOX_UNAVAILABLE`（沙箱预检结果缓存 60 秒，不会联系模型）。
-- **主页的「Codex CLI 接入检查」**：超级管理员打开「工作台概览」会看到六项检查（执行器连接、Codex CLI 与版本、模型与端点、模型凭据、模型端点连通、沙箱）和一个总判断，其他角色看不到也不会发起请求。它通过 `GET /api/system/codex-status` 读取 runner 需要令牌的 `GET /status`；不改变 `/health`，所以模型服务商的临时故障不会让容器被判为不健康。模型端点连通检查只请求 `<端点>/models`（不产生模型调用、不消耗额度），不跟随重定向，结果缓存约 30 秒，「重新检查」最短每 5 秒刷新一次。页面和接口只会得到模型 id、端点主机名、版本号和状态码，不会返回 Key、完整地址或服务商的响应内容。端点不提供 `/models` 时显示「无法验证」，不算失败。升级时要同时更新 API 和 runner：旧 runner 没有 `/status`，页面会提示「执行器版本较旧」。
+- **主页的「Codex CLI 接入检查」**：超级管理员打开「工作台概览」会先看到执行器、Codex CLI 与认证方式；识别为系统 API 后才展示模型与端点、模型凭据、模型端点连通和沙箱，识别为本人或共享 ChatGPT 登录时展示登录状态与沙箱，不展示 API 专属检查。执行器不可用时也不会预设它使用 API。本机 Codex CLI 的 ChatGPT 登录不会自动共享给 Agent Hub 容器，页面会明确区分系统 API、本人 OAuth 和部署共享 OAuth。其他角色看不到检查区也不会发起请求。它通过 `GET /api/system/codex-status` 读取 runner 需要令牌的 `GET /status`；不改变 `/health`，所以模型服务商的临时故障不会让容器被判为不健康。模型端点连通检查只请求 `<端点>/models`（不产生模型调用、不消耗额度），不跟随重定向，结果缓存约 30 秒，「重新检查」最短每 5 秒刷新一次。页面和接口只会得到模型 id、端点主机名、版本号和状态码，不会返回 Key、完整地址或服务商的响应内容。端点不提供 `/models` 时显示「无法验证」，不算失败。升级时要同时更新 API 和 runner：旧 runner 没有 `/status`，页面会提示「执行器版本较旧」。
 - **第三方模型端点**：`CODEX_MODEL` 设模型 id，`CODEX_BASE_URL` 设 OpenAI 兼容的公网 https 地址（如 `https://models.example.com/v1`），并配 `OPENAI_API_KEY`、`CODEX_AUTH_MODE=api`。运行器会拒绝带账号/查询串/`..` 路径段的地址、非 443 端口、localhost、私网或保留地址；ChatGPT 登录模式下配置端点会直接报 `CODEX_BASE_URL_REQUIRES_API_MODE`，避免把登录令牌发给第三方。Key 只通过进程环境变量交给 Codex，不会写进 `config.toml`。模型 id 要与端点 `/models` 返回的完全一致（例如端点列的是 `gpt-6.1-sol`，写 `6.1-sol` 会得到 `model_not_found`）。
 - **Apple Silicon 上 amd64 的运行器无法启动 Codex 沙箱。** Docker Desktop 用 Rosetta 翻译 amd64 容器，Codex 为沙箱安装的 seccomp 过滤器是按 x86_64 编译的，arm64 内核拒绝它（`Invalid argument`），容器里没有任何办法绕过。同时 Docker 默认 seccomp 配置也拦截了沙箱需要的命名空间调用。因此默认栈里运行器会一直显示 `SANDBOX_UNAVAILABLE`。要让它在 Apple Silicon 上真正工作，显式启用原生 arm64 运行器（只有运行器改架构，其余服务仍是 amd64）：`docker compose --env-file .env.docker -f compose.yaml -f compose.runner-arm64.yaml up -d --build runner`。它会换上 `deploy/seccomp/runner.json`——Docker 官方默认配置加**一条**规则（放行 `clone`、`unshare`、`setns`、`mount`、`umount`、`umount2`、`pivot_root`、`sethostname`，由 `scripts/make_runner_seccomp.py` 生成，上游文件按 SHA-256 固定，改动上游必须先审核）。代价是运行器容器可以创建用户命名空间，内核攻击面比默认配置大；`cap_drop: ALL`、只读文件系统、`no-new-privileges`、网络隔离都不变。在 x86_64 的 Linux 主机上则不需要这个覆盖，只要放行同样的命名空间调用即可。
 - **让 arm64 选择对这个部署长期生效**：在本部署自己的 `.env.docker`（不进仓库）里加一行 `COMPOSE_FILE=compose.yaml:compose.runner-arm64.yaml`。否则以后有人执行不带 `-f` 的 `docker compose --env-file .env.docker up -d runner`，runner 会悄悄变回 amd64、沙箱检查重新失败。加了之后所有 `--env-file .env.docker` 的命令都自动带上覆盖；要回到 amd64，删掉这一行再重建 runner。`compose.yaml` 本身仍然默认 amd64。
@@ -203,9 +203,9 @@ Compose 栈由自带的 `db`（PostgreSQL 16）、`api`、`attachments`（附件
 - `CODEX_PROXY_URL` 在容器里要写 `http://host.docker.internal:端口`；运行器会自动让 `PLATFORM_BRIDGE_URL`、`ATTACHMENT_BRIDGE_URL` 里的服务名（如 `api`）绕过代理。
 - 带出网网络的容器（api、attachments、runner）在 Docker Desktop 上能通过 `host.docker.internal` 访问宿主机本地服务，这是 Docker Desktop 的通用行为，不是本栈的配置；详见影响清单。
 
-默认仅监听本机（上面示例是 http://127.0.0.1:18210；直接运行为 http://127.0.0.1:18200）。在本机浏览器打开，填写「初始化管理员」的姓名、邮箱、至少 12 位密码与确认密码。第一个成功注册的账号成为启用的超级管理员，随后返回登录页。其余账号由管理员创建。
+默认仅监听本机（上面示例是 http://127.0.0.1:18210；直接运行为 http://127.0.0.1:18200）。在本机浏览器打开，填写「初始化管理员」的姓名、邮箱、至少 12 位密码与确认密码。第一个成功注册的账号成为启用的超级管理员，创建成功即建立与正常登录相同的安全会话并直接进入初始化，不需要返回登录页重复输入密码。其余账号由管理员创建。
 
-首个管理员登录后自动进入导航第一项「初始化引导」，按认识工作空间、模型接入、组织成员、Skill/MCP、授权核验和试用六步阅读。进度保存到本人账号；“稍后继续”或“完成阅读”后不再自动跳转，可随时手动重看。旧账号和管理员后来创建的账号不会被强制跳转，手动开始引导也不会变为自动引导账号。引导只记录阅读进度，不自动修改业务配置、授权资源或调用模型；完成阅读不等于环境已验收。升级时为 `users` 增加可空的 `onboarding` JSON 字段，已有记录保留为空。
+首个管理员进入导航第一项「初始化引导」，按连接模型、选择使用方式、开始对话三步操作。系统 API 已配置时无需个人授权；个人模式可在第一步直接发起 ChatGPT 设备授权。第二步默认先用网页版，飞书/钉钉按需接入；组织、Skill/MCP 和精细授权不再作为首次使用的必经步骤。进度保存到本人账号；“稍后继续”或“完成并开始对话”后不再自动跳转，可随时手动重看。旧账号和管理员后来创建的账号不会被强制跳转，手动开始引导也不会变为自动引导账号。完成初始化只记录操作进度，不自动修改业务配置、授权资源、调用模型或发送测试消息，也不等于环境已验收。升级时为 `users` 增加可空的 `onboarding` JSON 字段，已有记录保留为空；旧六步进度读取时映射到新三步，下次保存写成新值。
 
 侧栏「使用说明」提供独立目录、关键词搜索和完整正文，与右下角「本页说明」共用同一份内容，按当前角色过滤。可阅读登录与首次注册说明，但不会在已登录状态重新开放初始化入口。
 
@@ -227,7 +227,7 @@ MCP 保存错误会区分 HTTPS 格式、端口、DNS 解析与非公网地址�
 
 ## 本人 ChatGPT 授权
 
-本地或开源自部署可在「个人设置」或 Codex 会话中点击「登录 ChatGPT 授权」。没有系统 API Key、没有自定义第三方端点，且 CODEX_AUTH_MODE=api 时提供个人设备授权；用户自行打开官方页面输入一次性代码。可能需要先在 ChatGPT 安全设置中开启设备登录，有账号不保证拥有 Codex 额度。系统 API Key 优先，失败时不会自动切换为其他账号；显式配置的共享 ChatGPT 模式会标明为共享，不导入为个人授权。
+本地或开源自部署可在首次初始化、「个人设置」或 Codex 会话中点击「登录 ChatGPT 授权」。没有系统 API Key、没有自定义第三方端点，且 CODEX_AUTH_MODE=api 时提供个人设备授权；待授权后点击「复制代码并打开官方页面」，由本人在官方页面输入一次性代码并确认，剪贴板不可用时仍可手动复制。可能需要先在 ChatGPT 安全设置中开启设备登录，有账号不保证拥有 Codex 额度。系统 API 模式不显示多余的个人授权按钮；系统 API Key 优先，失败时不会自动切换为其他账号；显式配置的共享 ChatGPT 模式会标明为共享，不导入为个人授权。
 
 飞书、钉钉已绑定的活跃用户可私聊发送 `/codex-login`、`/codex-status`、`/codex-logout`。群聊仅提示转私聊；钉钉旧 webhook 无法安全私发设备码时拒绝发起。链接与代码不进入普通会话记录。授权完成后请重新发送任务，不会自动重放失败任务。
 
@@ -312,8 +312,8 @@ Skill（给助手的工作说明）和 MCP（让助手调用的外部工具服�
 
 1. 完成首次管理员注册并登录。**员工不需要 Agent Hub 账号，整个平台只需要超级管理员账号**：员工通过飞书/钉钉使用，由管理员在「IM 集成 → 待接入发现」一键接入（见第 5 步）。「用户与角色」只用于创建需要登录网页的管理账号（组织管理员等），新增表单按名称选择组织和部门，可直接新增中文命名目录，ID 自动生成。
 2. 「Skill和MCP管理」新增 Skill 或 MCP，可限定给某个组织或某个部门使用（不选组织 = 全局；选了部门，只有该部门的成员和群能用，未设部门的组织级群不能用）。**Skill** 只需填写名称（支持中英文双语，如“广告诊断 / Ads Diagnosis”）和完整 Markdown 正文，也可导入 .txt / .md 文件（≤256KB）。无需单独填写用途说明；有效头部及额外元数据保留，缺失的必要字段由服务端补齐，完整内容限 64000 字符。编辑时保留完整文档，文档内的私有说明不会自动成为员工可见的公共说明。**MCP** 填写 HTTPS 服务地址（仅443端口，不支持stdio/OAuth登录流程），再选「不需要请求头」或「需要请求头」；需要时可添加多个请求头（最多10个），每个都有名称和密钥输入框，密钥保存时加密，列表和接口永远不返回明文。
-3. 授权管理为用户、群分别绑定资源。群聊必须两边均授权才生效。
-4. 聊天页创建私聊或群聊；右侧查看当前生效资源。执行队列异步刷新，同一会话只允许一个待执行任务。
+3. 授权管理为用户、群分别绑定资源。群聊必须两边均授权才生效。管理员也可在智能会话右侧的 Skills 或 MCP 区域点击「管理授权」，直接添加或撤销用户／群组的直接授权；可发送的群聊默认授权给当前用户，只读监管默认授权给会话所属用户，但仍不能代发消息。
+4. 聊天页创建私聊或群聊；右侧查看当前生效资源。Skills／MCP 右上角数字是当前会话实际生效的数量，不是资源库或直接授权总数；私聊按会话所属用户统计，只读监管不按管理员本人统计，组织／部门继承授权也会计入。添加、撤销后自动刷新，也可点击「刷新消息与能力」。执行队列异步刷新，同一会话只允许一个待执行任务。
 5. 左侧「IM 集成」中，超级管理员在「飞书应用配置」或「钉钉应用配置」填写应用ID、密钥、Robot Code与模式，点击「保存应用配置」。员工先私聊机器人，再在同页「待接入发现」刷新，点「处理接入」：默认「新建 IM 成员（无需网页账号）」，填写姓名（有昵称自动带入）、角色、组织和部门即可，成员创建与 IM 身份绑定在同一事务内完成；也可改选「绑定已有用户」。**「IM 集成」只处理私聊；群聊的一切（群登记、群聊发送者接入、群成员确认、群名和群成员昵称的刷新）都在「协作群组」页**：先把机器人加入群、@ 机器人发一条消息，再到「协作群组」的「群聊发送者待接入」和「已发现群 / 待绑定」处理。平台ID自动预填。保留手动入口。授权后必须重发，发现不等于授权。配置加密保存在PG，空白密钥保留、勾选明确清除；独立IM监督进程每5秒检测并重连，API/worker每次操作读取新配置。启动方法与密钥轮换边界见 [IM_SETUP.md](docs/IM_SETUP.md)。
 
 **仅 IM 成员的边界**：只有超级管理员能创建，且只能是「成员」或「团队负责人」，管理员角色必须在「用户与角色」单独创建带凭据的账号；组织和部门必须是目录中已存在且未归档的条目，不接受手填 ID；请求体不接受邮箱、密码或启用状态，服务端写入不可验证的锁定密码（`!`，不是 `盐:摘要` 格式，任何输入都无法通过校验）和保留域 `im.invalid` 下的占位邮箱，所以这类成员不可能登录网页，列表里显示为「仅 IM 接入」而不显示占位邮箱，接口以 `login_enabled=false` 标记。该发送者已有绑定时只能走「绑定已有用户」，不会重复创建；并发双击由配置锁串行，只会创建一个成员。创建、身份绑定与审计在同一事务内，任何一步失败整体回滚。审计 `user.create`（`via=im_discovery`）和 `im.discovery.approve`（`created_user=true`）不记录姓名。新成员默认没有任何 Skill / MCP，仍需在「绑定与授权」单独授权。

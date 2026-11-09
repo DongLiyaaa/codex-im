@@ -16,12 +16,12 @@ export function OAuthConfig({ provider }: { provider: 'feishu' | 'dingtalk' }) {
     toast.success('个人授权配置已保存'); window.dispatchEvent(new Event('hub-integration-config-saved'));
   }
   return <section className="panel">
-    <div className="section-heading"><h2>{provider === 'feishu' ? '飞书' : '钉钉'}个人 OAuth / CLI 授权配置</h2>
-      <div className="actions"><button className="secondary" disabled={!config.data} onClick={() => { setClear([]); setOpen(true); }}><Settings2 size={16}/>配置个人授权</button>
-        <button className="secondary" disabled={!config.data?.bot_app?.available} onClick={() => setReuse(config.data)}><Copy size={16}/>使用当前机器人应用（管理员确认）</button></div>
+    <div className="section-heading"><h2>{provider === 'feishu' ? '飞书' : '钉钉'}个人文档授权</h2>
+      <button className="primary" disabled={!config.data?.bot_app?.available} onClick={() => setReuse(config.data)}><Copy size={16}/>使用机器人应用，免重复填写</button>
     </div>
     <Feedback error={config.error}/>{config.loading ? <Loading/> : config.data && <>
-      <p>{config.data.configured ? '应用字段已配置；设备授权与本人 Identity 仍须验证' : '需要管理员配置：缺少个人 OAuth 应用配置'}</p><p>{config.data.message}</p>
+      <p>{config.data.configured ? '应用字段已配置；设备授权与本人 Identity 仍须验证' : '优先复用当前机器人应用；也可以展开高级选项配置独立应用。'}</p><p>{config.data.message}</p>
+      <details className="oauth-advanced"><summary>使用独立 OAuth 应用（高级）</summary><p>只有平台要求独立应用时才需要重复填写 Client ID 和 Secret。</p><button className="secondary" onClick={() => { setClear([]); setOpen(true); }}><Settings2 size={16}/>配置个人授权</button></details>
       {config.data.bot_app && <p>{config.data.bot_app.message}</p>}
       {config.data.credential_source === 'bot_app_copy' && <p>来源：机器人应用复制快照，版本 {config.data.bot_revision}；机器人变更不自动同步，需重新确认。</p>}
       {config.data.bot_copy_stale && <Feedback error="机器人应用已变化，复制快照已停用。请重新确认或填写独立应用配置。"/>}

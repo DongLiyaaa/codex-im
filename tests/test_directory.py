@@ -34,6 +34,25 @@ def test_directory_permissions_legacy_and_conflict(database):
         with database.begin() as db: d.create_department(d.CreateDepartment(name='广告部',org_id=org['id']),root,db)
 
 
+@pytest.mark.parametrize('kind', ['skill', 'mcp'])
+def test_readonly_supervised_capabilities_use_conversation_owner(database, kind):
+    with database.begin() as db:
+        owner=db.scalar(select(User))
+        admin=User(email='supervisor@example.invalid',name='Supervisor',password_hash='unused',role='super_admin',active=True)
+        resource=Resource(name='Authorized '+kind,kind=kind,enabled=True,config={})
+        db.add_all([admin,resource]);db.flush()
+        conversation=Conversation(title=' supervised ',owner_id=owner.id)
+        db.add(conversation);db.flush()
+        empty=main.capabilities(conversation.id,admin,db)
+        assert empty=={'skills':[],'mcps':[]}
+        db.add(Binding(subject_type='user',subject_id=owner.id,resource_id=resource.id));db.flush()
+        result=main.capabilities(conversation.id,admin,db)
+        key='skills' if kind=='skill' else 'mcps'
+        other='mcps' if kind=='skill' else 'skills'
+        assert [item['name'] for item in result[key]]==[resource.name]
+        assert result[other]==[]
+
+
 def test_global_admin_binding_enqueue_resources_and_revocation(database):
     with database.begin() as db:
         root=User(email='root@example.invalid',name='Super Admin',password_hash='unused',role='super_admin',active=True)

@@ -25,7 +25,7 @@ export function PageHelp({ pageId, title, role, suspended = false }: { pageId: H
     document.addEventListener('keydown', escape);
     return () => document.removeEventListener('keydown', escape);
   }, [open, suspended]);
-  return <div className="page-help" hidden={suspended}>
+  return <div className="page-help" data-page={pageId} hidden={suspended}>
     {open && <section ref={panel} id={id} className="page-help-panel" role="dialog" aria-modal="false" aria-labelledby={titleId} tabIndex={-1}>
       <header className="page-help-heading">
         <BookOpen size={19} aria-hidden="true"/>
@@ -48,7 +48,7 @@ export function PageHelp({ pageId, title, role, suspended = false }: { pageId: H
       </div>
       <footer className="page-help-footnote">可继续操作页面，按 Esc 收起</footer>
     </section>}
-    <button ref={trigger} type="button" className="page-help-trigger" aria-expanded={open} aria-controls={open ? id : undefined}
+    <button ref={trigger} type="button" className="page-help-trigger" aria-label="本页说明" aria-expanded={open} aria-controls={open ? id : undefined}
       aria-haspopup="dialog" onClick={() => open ? collapse() : setOpen(true)}>
       <BookOpen size={18} aria-hidden="true"/><span>本页说明</span>
     </button>

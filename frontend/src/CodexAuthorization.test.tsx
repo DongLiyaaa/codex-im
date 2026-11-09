@@ -4,7 +4,11 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { CodexAuthorization } from './CodexAuthorization';
 const { request, send } = vi.hoisted(() => ({ request: vi.fn(), send: vi.fn() }));
 vi.mock('./api', async original => ({ ...await original<typeof import('./api')>(), api: request, post: send }));
-afterEach(() => { cleanup(); request.mockReset(); send.mockReset(); });
+afterEach(() => { cleanup(); request.mockReset(); send.mockReset(); Reflect.deleteProperty(navigator, 'clipboard'); });
+function clipboard(writeText = vi.fn().mockResolvedValue(undefined)) {
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  return writeText;
+}
 const empty = { mode: 'personal', state: 'disconnected', message: '尚未连接本人 ChatGPT', account: {} };
 const waiting = { ...empty, state: 'pending', message: '等待本人确认', url: 'https://auth.openai.com/codex/device', user_code: 'ABCD-1234' };
 
@@ -18,11 +22,35 @@ it('starts only on click, prevents duplicate submissions, and shows the official
   fireEvent.click(button); fireEvent.click(button);
   expect(send).toHaveBeenCalledTimes(1);
   request.mockResolvedValue(waiting); resolve(waiting);
-  const link = await screen.findByRole('link', { name: '打开 ChatGPT 官方授权页面' });
+  const link = await screen.findByRole('link', { name: '复制代码并打开官方页面' });
   expect(link.getAttribute('href')).toBe(waiting.url);
   expect(link.getAttribute('rel')).toBe('noopener noreferrer');
   expect(screen.getByText('ABCD-1234')).toBeTruthy();
   expect(send).toHaveBeenCalledWith('/auth/codex/start', {});
+});
+
+it('copies the code when opening the official page and reports clipboard failure honestly', async () => {
+  request.mockResolvedValue(waiting);
+  const writeText = clipboard();
+  render(<CodexAuthorization/>);
+  const link = await screen.findByRole('link', { name: '复制代码并打开官方页面' });
+  link.addEventListener('click', event => event.preventDefault());
+  fireEvent.click(link);
+  await screen.findByText('代码已复制，请在官方页面粘贴。');
+  expect(writeText).toHaveBeenCalledWith('ABCD-1234');
+  writeText.mockRejectedValueOnce(new Error('denied'));
+  fireEvent.click(screen.getByRole('button', { name: '已复制' }));
+  await screen.findByText('复制失败，请手动复制上方代码，再打开官方页面。');
+  expect(screen.queryByText('代码已复制，请在官方页面粘贴。')).toBeNull();
+  expect(screen.getByText('ABCD-1234')).toBeTruthy();
+});
+
+it('reports the real authorization state to the onboarding flow', async () => {
+  const onStatus = vi.fn();
+  request.mockResolvedValue(empty);
+  render(<CodexAuthorization onStatus={onStatus}/>);
+  await screen.findByRole('button', { name: '登录 ChatGPT 授权' });
+  await waitFor(() => expect(onStatus).toHaveBeenLastCalledWith(empty));
 });
 
 it('clears authorization material after cancel and reports disconnected', async () => {
